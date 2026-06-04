@@ -3,16 +3,20 @@ import type { AppInfo, Session, SessionListItem, ChatMessage } from '../shared/i
 import { ThemeProvider } from './contexts/ThemeContext';
 import Chat from './components/Chat';
 import Sidebar from './components/Sidebar';
-import SettingsModal from './components/SettingsModal';
-import ModelSettings from './components/ModelSettings';
+import SettingsHub, { type SettingsTab } from './components/SettingsHub';
+import SkillsStore from './components/SkillsStore';
+import { I18nProvider } from './contexts/I18nContext';
 import FileBrowser from './components/FileBrowser';
 
 export default function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [sessionList, setSessionList] = useState<SessionListItem[]>([]);
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
-  const [showModelSettings, setShowModelSettings] = useState(false);
+  const [settingsHub, setSettingsHub] = useState<{ open: boolean; tab: SettingsTab }>({
+    open: false,
+    tab: 'general',
+  });
+  const [showSkillsStore, setShowSkillsStore] = useState(false);
   const [showFileBrowser, setShowFileBrowser] = useState(false);
   const [cwdForBrowser, setCwdForBrowser] = useState('');
 
@@ -110,7 +114,12 @@ export default function App() {
     }
   }, [currentSession, refreshSessionList]);
 
+  const openSettings = useCallback((tab: SettingsTab = 'general') => {
+    setSettingsHub({ open: true, tab });
+  }, []);
+
   return (
+    <I18nProvider>
     <ThemeProvider>
       <div className="app-shell">
         <Sidebar
@@ -120,8 +129,8 @@ export default function App() {
           onNewSession={handleNewSession}
           onSelectSession={handleSelectSession}
           onDeleteSession={handleDeleteSession}
-          onOpenSettings={() => setShowSettings(true)}
-          onOpenModelSettings={() => setShowModelSettings(true)}
+          onOpenSettings={openSettings}
+          onOpenSkillsStore={() => setShowSkillsStore(true)}
           onOpenFileBrowser={() => handleOpenFileBrowser(currentSession?.cwd ?? '')}
         />
         <main className="app-main">
@@ -135,17 +144,16 @@ export default function App() {
         </main>
       </div>
 
-      {showSettings && (
-        <SettingsModal onClose={() => setShowSettings(false)} />
+      {settingsHub.open && (
+        <SettingsHub
+          initialTab={settingsHub.tab}
+          onClose={() => setSettingsHub((s) => ({ ...s, open: false }))}
+          onModelSaved={refreshAppInfo}
+        />
       )}
 
-      {showModelSettings && (
-        <ModelSettings
-          onClose={() => {
-            setShowModelSettings(false);
-            refreshAppInfo();
-          }}
-        />
+      {showSkillsStore && (
+        <SkillsStore onClose={() => setShowSkillsStore(false)} />
       )}
 
       {showFileBrowser && (
@@ -165,5 +173,6 @@ export default function App() {
         />
       )}
     </ThemeProvider>
+    </I18nProvider>
   );
 }

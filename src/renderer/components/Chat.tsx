@@ -3,7 +3,9 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { AgentEvent, ChatMessage, FileSnapshot, MessageSegment, Session, Unsubscribe } from '../../shared/ipc';
 import type { SkillListItem } from '../../shared/skills-types';
-import { formatHelpMessage, formatSkillsListMessage, parseSlashCommand } from '../../shared/skills-types';
+import { formatHelpLocalized, formatSkillsListLocalized } from '../../shared/i18n';
+import { parseSlashCommand } from '../../shared/skills-types';
+import { useI18n } from '../contexts/I18nContext';
 import CodeBlock from './CodeBlock';
 import ToolCallCard from './ToolCallCard';
 import ThinkingBlock from './ThinkingBlock';
@@ -266,6 +268,7 @@ function renderMarkdown(text: string) {
 }
 
 export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorkspaceChange, onRollback }: Props) {
+  const { t, locale } = useI18n();
   const [uiMessages, setUiMessages] = useState<UiMessage[]>([]);
   const [input, setInput] = useState('');
   const [running, setRunning] = useState(false);
@@ -325,12 +328,25 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
     messagesRef.current = uiMessages;
   }, [uiMessages]);
 
-  useEffect(() => {
+  const reloadSkills = useCallback(() => {
     void window.koder.getSkills().then(setSkills);
   }, []);
 
+  useEffect(() => {
+    reloadSkills();
+    return window.koder.onSkillsChanged(reloadSkills);
+  }, [reloadSkills]);
+
+  useEffect(() => {
+    if (input.startsWith('/')) reloadSkills();
+  }, [input, reloadSkills]);
+
   const slashFilter = input.startsWith('/') ? input : '';
-  const slashMenuItems = buildSlashMenuItems(skills, slashFilter);
+  const slashMenuItems = buildSlashMenuItems(skills, slashFilter, {
+    skillsDesc: t('slash.skills.desc'),
+    helpDesc: t('slash.help.desc'),
+    skillUsePrefix: t('slash.skill'),
+  });
 
   useEffect(() => {
     setSlashSelected(0);
@@ -398,11 +414,11 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
 
     if (parsed.type === 'list_skills') {
-      await appendSystemInfo(formatSkillsListMessage(skills));
+      await appendSystemInfo(formatSkillsListLocalized(locale, skills));
       return;
     }
     if (parsed.type === 'list_help') {
-      await appendSystemInfo(formatHelpMessage());
+      await appendSystemInfo(formatHelpLocalized(locale));
       return;
     }
 
@@ -520,7 +536,7 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
             setUiMessages((prev) =>
               prev.map((m) => {
                 if (m.id !== assistantMsgId) return m;
-                const segments = applyTextDelta(m.segments, `\n\n**错误**: ${e.data ?? '未知错误'}`);
+                const segments = applyTextDelta(m.segments, `\n\n**${t('chat.error')}**: ${e.data ?? t('chat.errorUnknown')}`);
                 const closed = closeStreamingThinking(segments).map(s =>
                   s.type === 'thinking' ? { ...s, streaming: false } : s,
                 );
@@ -560,7 +576,7 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
       setUiMessages((prev) =>
         prev.map((m) =>
           m.id === assistantMsgId
-            ? { ...m, text: `**错误**: ${(err as Error).message}`, streaming: false }
+            ? { ...m, text: `**${t('chat.error')}**: ${(err as Error).message}`, streaming: false }
             : m,
         ),
       );
@@ -636,11 +652,11 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
       setUiMessages((prev) => prev.slice(0, assistantMsgIndex));
       onRollback();
       setToast({
-        message: `回退成功：恢复了 ${result.filesRestored} 个文件，删除了 ${result.messagesRemoved} 条消息`,
+        message: t('chat.rollback.ok', { files: result.filesRestored, msgs: result.messagesRemoved }),
         type: 'success',
       });
     } else {
-      setToast({ message: '回退失败：找不到该会话', type: 'error' });
+      setToast({ message: t('chat.rollback.fail'), type: 'error' });
     }
   }, [session, running, onRollback]);
 
@@ -687,8 +703,8 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
         {uiMessages.length === 0 ? (
           <div className="chat-empty">
             <div className="chat-empty-icon"><IconChat /></div>
-            <h2>开始对话</h2>
-            <p>输入你的编程需求，Koder Agent 会自动读取代码、执行命令、完成任务。</p>
+            <h2>{t('chat.empty.title')}</h2>
+            <p>{t('chat.empty.desc')}</p>
           </div>
         ) : (
           uiMessages.map((m, msgIndex) => {
@@ -705,10 +721,10 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
               <div key={m.id} className="msg-row">
                 <div className="msg-row-inner">
                   <div className={`msg-avatar msg-avatar-${m.role}`}>
-                    {m.role === 'user' ? '你' : 'K'}
+                    {m.role === 'user' ? t('chat.you').charAt(0) : 'K'}
                   </div>
                   <div className="msg-body">
-                    <div className="msg-role-label">{m.role === 'user' ? '你' : 'Koder'}</div>
+                    <div className="msg-role-label">{m.role === 'user' ? t('chat.you') : t('chat.assistant')}</div>
                     <div className="msg-content">
                       {m.role === 'assistant' ? (
                         <>
@@ -718,10 +734,10 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
                                 .slice(0, segIndex + 1)
                                 .filter(s => s.type === 'thinking').length;
                               const label = seg.streaming
-                                ? '思考中…'
+                                ? t('chat.thinking')
                                 : thinkingCount > 1
-                                  ? `思考过程 ${thinkIndex}`
-                                  : '思考过程';
+                                  ? t('chat.thinkingProcessN', { n: thinkIndex })
+                                  : t('chat.thinkingProcess');
                               return (
                                 <ThinkingBlock
                                   key={seg.id}
@@ -756,9 +772,9 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
                       <button
                         className="msg-rollback-btn"
                         onClick={() => confirmRollback(msgIndex > 0 ? msgIndex - 1 : msgIndex)}
-                        title="回退此轮对话（恢复文件 + 删除消息）"
+                        title={t('chat.rollback.warn')}
                       >
-                        <IconRollback /> 回退
+                        <IconRollback /> {t('chat.rollback')}
                       </button>
                     )}
                   </div>
@@ -776,11 +792,11 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
               className="workspace-btn"
               onClick={handleSelectWorkspace}
               disabled={running || !session}
-              title="选择工作目录"
+              title={t('chat.workspace.select')}
             >
               <IconFolder />
               <span className="workspace-label">
-                {session?.cwd ? session.cwd.split(/[\\/]/).pop() : '选择工作区'}
+                {session?.cwd ? session.cwd.split(/[\\/]/).pop() : t('chat.workspace.pick')}
               </span>
             </button>
             {session?.cwd && (
@@ -793,7 +809,7 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
               <div
                 className="context-usage-bar"
                 onClick={() => setShowContextDetail(prev => !prev)}
-                title={showContextDetail ? '收起详情' : '点击查看详情'}
+                title={showContextDetail ? t('chat.context.collapse') : t('chat.context.detail')}
               >
                 <div
                   className="context-usage-fill"
@@ -802,7 +818,7 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
                 <span className="context-usage-text">
                   {Math.min((contextUsage.current / contextUsage.max) * 100, 100).toFixed(1)}% · {(contextUsage.current / 1000).toFixed(0)}K / {(contextUsage.max / 1000).toFixed(0)}K
                   {contextUsage.cacheHitRate != null && contextUsage.cacheHitRate > 0 && (
-                    <> · 缓存 {contextUsage.cacheHitRate.toFixed(0)}%</>
+                    <> · {t('chat.context.cacheSuffix')} {contextUsage.cacheHitRate.toFixed(0)}%</>
                   )}
                 </span>
               </div>
@@ -810,50 +826,50 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
                 <div className="context-usage-detail">
                   {(contextUsage.cachedTokens != null && contextUsage.cachedTokens > 0) && (
                     <div className="context-detail-row context-detail-cache">
-                      <span>API Prompt 缓存</span>
+                      <span>{t('chat.context.apiCache')}</span>
                       <span className="context-detail-cache-val">
-                        {(contextUsage.cachedTokens / 1000).toFixed(1)}K tokens · 命中率 {contextUsage.cacheHitRate?.toFixed(1) ?? 0}%
+                        {(contextUsage.cachedTokens / 1000).toFixed(1)}K tokens · {t('chat.context.cacheHit')} {contextUsage.cacheHitRate?.toFixed(1) ?? 0}%
                       </span>
                     </div>
                   )}
                   {(contextUsage.toolCacheHits != null || contextUsage.toolCacheMisses != null) && (
                     <div className="context-detail-row context-detail-cache">
-                      <span>本地工具缓存</span>
+                      <span>{t('chat.context.toolCache')}</span>
                       <span className="context-detail-cache-val">
-                        命中 {contextUsage.toolCacheHits ?? 0} · 未命中 {contextUsage.toolCacheMisses ?? 0}
+                        {t('chat.context.hits')} {contextUsage.toolCacheHits ?? 0} · {t('chat.context.misses')} {contextUsage.toolCacheMisses ?? 0}
                       </span>
                     </div>
                   )}
                   <div className="context-detail-row">
-                    <span>系统提示词</span>
+                    <span>{t('chat.context.system')}</span>
                     <span className="context-detail-bar-wrap">
                       <span className="context-detail-bar" style={{ width: `${(contextUsage.breakdown.system / contextUsage.max) * 100}%` }} />
                     </span>
                     <span className="context-detail-num">{(contextUsage.breakdown.system / 1000).toFixed(1)}K</span>
                   </div>
                   <div className="context-detail-row">
-                    <span>对话历史</span>
+                    <span>{t('chat.context.history')}</span>
                     <span className="context-detail-bar-wrap">
                       <span className="context-detail-bar" style={{ width: `${(contextUsage.breakdown.history / contextUsage.max) * 100}%` }} />
                     </span>
                     <span className="context-detail-num">{(contextUsage.breakdown.history / 1000).toFixed(1)}K</span>
                   </div>
                   <div className="context-detail-row">
-                    <span>工具定义</span>
+                    <span>{t('chat.context.toolDefs')}</span>
                     <span className="context-detail-bar-wrap">
                       <span className="context-detail-bar" style={{ width: `${(contextUsage.breakdown.toolDefs / contextUsage.max) * 100}%` }} />
                     </span>
                     <span className="context-detail-num">{(contextUsage.breakdown.toolDefs / 1000).toFixed(1)}K</span>
                   </div>
                   <div className="context-detail-row">
-                    <span>工具结果</span>
+                    <span>{t('chat.context.toolResults')}</span>
                     <span className="context-detail-bar-wrap">
                       <span className="context-detail-bar" style={{ width: `${(contextUsage.breakdown.toolResults / contextUsage.max) * 100}%` }} />
                     </span>
                     <span className="context-detail-num">{(contextUsage.breakdown.toolResults / 1000).toFixed(1)}K</span>
                   </div>
                   <div className="context-detail-row">
-                    <span>当前输出</span>
+                    <span>{t('chat.context.output')}</span>
                     <span className="context-detail-bar-wrap">
                       <span className="context-detail-bar" style={{ width: `${(contextUsage.breakdown.currentOutput / contextUsage.max) * 100}%` }} />
                     </span>
@@ -869,6 +885,7 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
               selectedIndex={slashSelected}
               onSelect={handleSlashSelect}
               visible={slashMenuOpen}
+              kindLabels={{ cmd: t('slash.cmd'), skill: t('slash.skill') }}
             />
             <textarea
               ref={textareaRef}
@@ -877,19 +894,19 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
               value={input}
               onChange={(e) => { setInput(e.target.value); autoResize(); }}
               onKeyDown={handleKeyDown}
-              placeholder="输入需求… 输入 / 查看命令与 Skills（Ctrl/⌘ + Enter 发送）"
+              placeholder={t('chat.placeholder')}
             />
           </div>
           <div className="composer-actions">
-            <span className="composer-hint">Ctrl/⌘ + Enter 发送</span>
+            <span className="composer-hint">{t('chat.hint')}</span>
             <div className="composer-buttons">
               {running ? (
                 <button className="btn btn-danger" onClick={handleCancel}>
-                  <IconStop /> 停止
+                  <IconStop /> {t('chat.stop')}
                 </button>
               ) : (
                 <button className="btn btn-primary" onClick={handleSubmit} disabled={!input.trim() || !session}>
-                  <IconSend /> 发送
+                  <IconSend /> {t('chat.send')}
                 </button>
               )}
             </div>
@@ -902,7 +919,7 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
         <div className="modal-overlay" onClick={cancelRollback}>
           <div className="modal" style={{ maxWidth: 400 }}>
             <div className="modal-header">
-              <h2>确认回退</h2>
+              <h2>{t('chat.rollback.title')}</h2>
               <button className="icon-btn" onClick={cancelRollback}>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: 18, height: 18 }}>
                   <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
@@ -910,16 +927,16 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
               </button>
             </div>
             <div className="modal-body">
-              <p>回退操作将：</p>
+              <p>{t('chat.rollback.body1')}</p>
               <ul>
-                <li>恢复 Agent 修改过的文件到原始状态</li>
-                <li>删除此轮对话及之后的所有消息</li>
+                <li>{t('chat.rollback.li1')}</li>
+                <li>{t('chat.rollback.li2')}</li>
               </ul>
-              <p style={{ color: 'var(--danger)', fontWeight: 500 }}>此操作不可撤销，确定要继续吗？</p>
+              <p style={{ color: 'var(--danger)', fontWeight: 500 }}>{t('chat.rollback.warn')}</p>
             </div>
             <div className="modal-footer">
-              <button className="btn btn-ghost" onClick={cancelRollback}>取消</button>
-              <button className="btn btn-danger" onClick={() => handleRollback(pendingRollback)}>确认回退</button>
+              <button className="btn btn-ghost" onClick={cancelRollback}>{t('chat.cancel')}</button>
+              <button className="btn btn-danger" onClick={() => handleRollback(pendingRollback)}>{t('chat.confirmRollback')}</button>
             </div>
           </div>
         </div>

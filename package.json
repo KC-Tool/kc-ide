@@ -26,6 +26,7 @@
   },
   "pnpm": {},
   "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
     "@types/node": "^25.9.1",
     "@types/react": "^19.2.16",
     "@types/react-dom": "^19.2.3",
@@ -42,6 +43,7 @@
     "wait-on": "^8.0.5"
   },
   "dependencies": {
+    "adm-zip": "^0.5.17",
     "highlight.js": "^11.11.1",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1"

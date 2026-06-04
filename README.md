@@ -30,7 +30,7 @@ koder/
 │  │  ├─ tools.ts             # 7 个内置工具
 │  │  ├─ session-manager.ts   # 会话持久化 + 文件回退
 │  │  ├─ config-manager.ts    # ~/.koder/config.json
-│  │  └─ settings-manager.ts  # 主题、字号等
+│  │  └─ settings-manager.ts  # 主题、字号、界面语言
 │  ├─ preload/index.cjs       # window.koder API
 │  ├─ shared/
 │  │  ├─ ipc.ts               # 跨进程类型契约
@@ -43,7 +43,7 @@ koder/
 │        ├─ ToolCallCard.tsx   # 工具卡片、实时预览、diff
 │        ├─ FileDiffView.tsx   # 代码对比视图
 │        ├─ Sidebar.tsx        # 会话列表
-│        └─ ModelSettings.tsx  # API / 模型 / 思考等级配置
+│        └─ SettingsHub.tsx    # 统一设置（通用 / 模型 / Skills 商店）
 ```
 
 ## 快速开始
@@ -65,11 +65,11 @@ pnpm dev
 
 ### 3. 首次配置
 
-1. 启动后点击侧边栏 **模型配置**
+1. 启动后点击侧边栏 **设置** → **模型** 标签
 2. 填写 **API Key**、**Base URL**、**模型 ID**
 3. 可选调整 **思考等级**（`reasoning_effort`，需模型支持）
 
-配置保存在 `~/.koder/config.json`。
+Agent 配置保存在 `~/.koder/config.json`；界面偏好（主题、字号、语言）保存在 Electron `userData/settings.json`。
 
 ### 4. 类型检查与打包
 
@@ -97,8 +97,11 @@ pnpm package:dir    # 仅生成解压目录
 | 一键回退 | 恢复 Agent 修改过的文件 + 删除后续消息 |
 | 上下文占用 | 实时显示 token 占用百分比与分段明细 |
 | **双层缓存** | API Prompt 缓存优化 + 本地工具结果 LRU 缓存 |
-| 模型配置 | API Key、Base URL、模型、温度、maxTokens、思考等级、系统提示词 |
-| 主题 | 明暗主题切换 |
+| **Skills 系统** | 内置 `skills/builtin/`，slash 命令激活，注入 Agent 上下文 |
+| **代码高亮** | highlight.js，明暗主题，聊天/工具卡片/思考块 |
+| 统一设置中心 | **通用**：主题、字号、中/英界面；**模型**：API、思考等级、缓存、系统提示词（标签切换带动画） |
+| Skills 商店 | 独立弹窗：浏览 [SkillHub.cn](https://www.skillhub.cn/skills)、一键安装到 `~/.koder/skills/`，安装后 `/` 命令实时更新 |
+| 国际化 | 中文 / English，写入 `settings.json`，切换后即时生效 |
 
 ### 内置 Agent 工具
 
@@ -146,9 +149,22 @@ Koder 采用 **双层缓存** 降低延迟与 API 成本：
 
 - 缓存键含文件 **mtime**，内容变化自动失效
 - 写入文件 / 执行 shell 后自动失效相关条目
-- 可在 **模型配置 → 缓存** 中开关与调整上限
+- 可在 **设置 → 模型 → 缓存** 中开关与调整上限
 
 上下文占用条点击展开可查看 **API 缓存命中率** 与 **本地工具缓存命中/未命中** 统计。
+
+### Skills 与 Slash 命令
+
+| 命令 | 说明 |
+| --- | --- |
+| `/skills` | 列出内置与用户 Skills |
+| `/help` | 显示命令帮助 |
+| `/<skill-id> <消息>` | 加载 Skill 并发送，如 `/debug 分析这个报错` |
+| `/skill <id> <消息>` | 同上 |
+
+内置 Skills（`skills/builtin/`）：`vibe-coding`、`code-review`、`debug`、`refactor`、`git-commit`
+
+用户可在 `~/.koder/skills/<id>/SKILL.md` 添加自定义 Skill，或在 **Skills 商店** 从 SkillHub 安装（调用 `https://api.skillhub.cn` 下载 zip 包）。格式见 [skills/README.md](skills/README.md)。
 
 ## 使用说明
 
@@ -180,7 +196,7 @@ Koder 采用 **双层缓存** 降低延迟与 API 成本：
 | --- | --- | --- |
 | `config.json` | `~/.koder/` | API 配置、系统提示词 |
 | `sessions.json` | Electron userData | 会话、消息、segments、文件快照 |
-| `settings.json` | Electron userData | 主题、字号 |
+| `settings.json` | Electron userData | 主题、字号、`locale`（`zh` / `en`） |
 
 ### tsx 零编译
 
@@ -194,9 +210,13 @@ Koder 采用 **双层缓存** 降低延迟与 API 成本：
 - [x] 文件写入实时预览
 - [x] 思考等级配置（reasoning_effort）
 - [x] 双层缓存（API Prompt + 本地工具 LRU）
+- [x] 内置 Skills + Slash 命令（/skills、/skill-id）
+- [x] 代码语法高亮（多语言 + 明暗主题）
 - [ ] MCP 工具面板
 - [ ] 写入前确认（apply diff 前人工审核）
-- [ ] 国际化（中/英切换）
+- [x] 国际化（中/英切换，设置中心保存）
+- [x] 统一设置入口（通用 + 模型分栏）
+- [x] Skills 商店 UI
 - [ ] 自动更新（electron-updater）
 - [ ] 生产打包完善（主进程资源纳入 asar）
 

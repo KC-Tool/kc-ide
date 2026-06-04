@@ -1,6 +1,8 @@
 import { useMemo } from 'react';
 import type { AppInfo, SessionListItem } from '../../shared/ipc';
 import { useTheme } from '../contexts/ThemeContext';
+import { useI18n } from '../contexts/I18nContext';
+import type { SettingsTab } from './SettingsHub';
 
 interface Props {
   info: AppInfo | null;
@@ -9,13 +11,12 @@ interface Props {
   onNewSession: () => void;
   onSelectSession: (id: string) => void;
   onDeleteSession: (id: string) => void;
-  onOpenSettings: () => void;
-  onOpenModelSettings: () => void;
+  onOpenSettings: (tab?: SettingsTab) => void;
+  onOpenSkillsStore: () => void;
   onOpenFileBrowser: () => void;
 }
 
-// 按时间分组：今天、昨天、更早
-function groupSessions(list: SessionListItem[]) {
+function groupSessions(list: SessionListItem[], labels: { today: string; yesterday: string; older: string }) {
   const now = Date.now();
   const dayMs = 86400000;
   const today: SessionListItem[] = [];
@@ -34,13 +35,12 @@ function groupSessions(list: SessionListItem[]) {
   }
 
   const groups: { label: string; items: SessionListItem[] }[] = [];
-  if (today.length > 0) groups.push({ label: '今天', items: today });
-  if (yesterday.length > 0) groups.push({ label: '昨天', items: yesterday });
-  if (older.length > 0) groups.push({ label: '更早', items: older });
+  if (today.length > 0) groups.push({ label: labels.today, items: today });
+  if (yesterday.length > 0) groups.push({ label: labels.yesterday, items: yesterday });
+  if (older.length > 0) groups.push({ label: labels.older, items: older });
   return groups;
 }
 
-// SVG icons (inline, no dependency)
 const IconPlus = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
@@ -59,9 +59,11 @@ const IconSettings = () => (
   </svg>
 );
 
-const IconCpu = () => (
+const IconSparkles = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <rect x="4" y="4" width="16" height="16" rx="2" ry="2" /><rect x="9" y="9" width="6" height="6" /><line x1="9" y1="1" x2="9" y2="4" /><line x1="15" y1="1" x2="15" y2="4" /><line x1="9" y1="20" x2="9" y2="23" /><line x1="15" y1="20" x2="15" y2="23" /><line x1="20" y1="9" x2="23" y2="9" /><line x1="20" y1="14" x2="23" y2="14" /><line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
+    <path d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3z" />
+    <path d="M5 17l.75 2.25L8 20l-2.25.75L5 23l-.75-2.25L2 20l2.25-.75L5 17z" />
+    <path d="M19 13l.5 1.5L21 15l-1.5.5L19 17l-.5-1.5L17 15l1.5-.5L19 13z" />
   </svg>
 );
 
@@ -79,33 +81,45 @@ export default function Sidebar({
   onSelectSession,
   onDeleteSession,
   onOpenSettings,
-  onOpenModelSettings,
+  onOpenSkillsStore,
   onOpenFileBrowser,
 }: Props) {
   const { theme, toggle } = useTheme();
-  const groups = useMemo(() => groupSessions(sessionList), [sessionList]);
+  const { t } = useI18n();
+
+  const groupLabels = useMemo(
+    () => ({
+      today: t('sidebar.group.today'),
+      yesterday: t('sidebar.group.yesterday'),
+      older: t('sidebar.group.older'),
+    }),
+    [t],
+  );
+
+  const groups = useMemo(
+    () => groupSessions(sessionList, groupLabels),
+    [sessionList, groupLabels],
+  );
 
   return (
     <aside className="sidebar">
-      {/* Header */}
       <div className="sidebar-header">
         <div className="brand">
           <div className="logo">K</div>
           <div className="brand-text">
-            <div className="brand-name">Koder</div>
-            <div className="brand-sub">v{info?.version ?? '…'} · Codex Desktop</div>
+            <div className="brand-name">{t('app.name')}</div>
+            <div className="brand-sub">v{info?.version ?? '…'} · {t('app.subtitle')}</div>
           </div>
         </div>
-        <button className="btn-new-chat" onClick={onNewSession}>
+        <button type="button" className="btn-new-chat" onClick={onNewSession}>
           <IconPlus />
-          新会话
+          {t('sidebar.newChat')}
         </button>
       </div>
 
-      {/* Session List */}
       <div className="session-list">
         {groups.length === 0 && (
-          <div className="session-list-empty">还没有会话</div>
+          <div className="session-list-empty">{t('sidebar.noSessions')}</div>
         )}
         {groups.map((group) => (
           <div key={group.label}>
@@ -113,17 +127,19 @@ export default function Sidebar({
             {group.items.map((s) => (
               <button
                 key={s.id}
+                type="button"
                 className={`session-item ${s.id === currentSessionId ? 'active' : ''}`}
                 onClick={() => onSelectSession(s.id)}
               >
                 <span className="session-item-title">{s.title}</span>
                 <button
+                  type="button"
                   className="session-item-delete"
                   onClick={(e) => {
                     e.stopPropagation();
                     onDeleteSession(s.id);
                   }}
-                  title="删除会话"
+                  title={t('sidebar.deleteSession')}
                 >
                   <IconX />
                 </button>
@@ -133,45 +149,45 @@ export default function Sidebar({
         ))}
       </div>
 
-      {/* Footer */}
       <div className="sidebar-footer">
-        <button className="sidebar-footer-item" onClick={onOpenFileBrowser}>
+        <button type="button" className="sidebar-footer-item" onClick={onOpenFileBrowser}>
           <IconFolder />
-          文件浏览
+          {t('sidebar.fileBrowser')}
         </button>
-        <button className="sidebar-footer-item" onClick={onOpenModelSettings}>
-          <IconCpu />
-          模型配置
+        <button type="button" className="sidebar-footer-item" onClick={onOpenSkillsStore}>
+          <IconSparkles />
+          {t('sidebar.skillsStore')}
         </button>
-        <button className="sidebar-footer-item" onClick={onOpenSettings}>
+        <button type="button" className="sidebar-footer-item" onClick={() => onOpenSettings('general')}>
           <IconSettings />
-          设置
+          {t('sidebar.settings')}
         </button>
         <div className="sidebar-footer-item" style={{ cursor: 'default' }}>
           <div className="theme-toggle">
-            <span className="theme-toggle-label">亮</span>
+            <span className="theme-toggle-label">{t('sidebar.theme.light')}</span>
             <button
+              type="button"
               className={`theme-toggle-switch ${theme === 'dark' ? 'active' : ''}`}
               onClick={toggle}
-              aria-label="切换主题"
+              aria-label={t('settings.general.theme')}
             />
-            <span className="theme-toggle-label">暗</span>
+            <span className="theme-toggle-label">{t('sidebar.theme.dark')}</span>
           </div>
         </div>
 
         <div className="env-status">
           <div className="env-row">
-            <span>Agent</span>
+            <span>{t('sidebar.env.agent')}</span>
             <span className={info?.agentConfigured ? 'status-ok' : 'status-warn'}>
-              {info?.agentConfigured ? info.agentModel : '未配置'}
+              {info?.agentConfigured ? info.agentModel : t('sidebar.env.notConfigured')}
             </span>
           </div>
           <div className="env-row">
-            <span>Electron</span>
+            <span>{t('sidebar.env.electron')}</span>
             <span>{info?.electron ?? '—'}</span>
           </div>
           <div className="env-row">
-            <span>Node</span>
+            <span>{t('sidebar.env.node')}</span>
             <span>{info?.node ?? '—'}</span>
           </div>
         </div>

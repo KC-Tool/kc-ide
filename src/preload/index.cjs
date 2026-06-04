@@ -10,6 +10,7 @@ try {
 
   // agent:message_saved 监听器管理
   const messageSavedListeners = new Set();
+  const skillsChangedListeners = new Set();
 
   ipcRenderer.on('agent:event', (_event, payload) => {
     for (const cb of agentListeners) {
@@ -27,6 +28,16 @@ try {
         cb(payload);
       } catch (err) {
         console.error('[koder preload] messageSaved listener error', err);
+      }
+    }
+  });
+
+  ipcRenderer.on('skills:changed', () => {
+    for (const cb of skillsChangedListeners) {
+      try {
+        cb();
+      } catch (err) {
+        console.error('[koder preload] skillsChanged listener error', err);
       }
     }
   });
@@ -74,6 +85,12 @@ try {
     getSkills: () => ipcRenderer.invoke('skills:list'),
     getSkill: (id) => ipcRenderer.invoke('skills:get', id),
     reloadSkills: () => ipcRenderer.invoke('skills:reload'),
+    searchSkillHub: (params) => ipcRenderer.invoke('skillhub:search', params),
+    installSkillFromSkillHub: (slug) => ipcRenderer.invoke('skillhub:install', slug),
+    onSkillsChanged: (cb) => {
+      skillsChangedListeners.add(cb);
+      return () => skillsChangedListeners.delete(cb);
+    },
 
     // ---- 消息保存通知 ----
     onMessageSaved: (cb) => {
@@ -116,6 +133,9 @@ try {
       getSkills: reject('preload 初始化失败'),
       getSkill: reject('preload 初始化失败'),
       reloadSkills: reject('preload 初始化失败'),
+      searchSkillHub: reject('preload 初始化失败'),
+      installSkillFromSkillHub: reject('preload 初始化失败'),
+      onSkillsChanged: reject('preload 初始化失败'),
       onMessageSaved: reject('preload 初始化失败'),
     });
   } catch {

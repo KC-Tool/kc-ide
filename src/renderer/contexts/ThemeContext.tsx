@@ -70,8 +70,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const updateSettings = useCallback(async (patch: Partial<AppSettings>) => {
     const s = await window.koder.updateSettings(patch);
     setSettings(s);
-    if (patch.theme) {
-      setTheme(patch.theme);
+    if (patch.theme !== undefined) {
+      setTheme(s.theme);
     }
   }, []);
 

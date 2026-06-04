@@ -1,6 +1,20 @@
 // Koder 主进程 ↔ 渲染进程共享类型与 IPC 契约
 // 任何跨进程通信都必须经过这里定义
 
+import type { SkillDetail, SkillListItem } from './skills-types.js';
+import type {
+  SkillHubInstallResult,
+  SkillHubSearchParams,
+  SkillHubSearchResult,
+} from './skillhub-types.js';
+export type { SkillDetail, SkillListItem } from './skills-types.js';
+export type {
+  SkillHubInstallResult,
+  SkillHubRemoteSkill,
+  SkillHubSearchParams,
+  SkillHubSearchResult,
+} from './skillhub-types.js';
+
 // ---- Agent 配置 ----
 
 export type ReasoningEffort = 'off' | 'low' | 'medium' | 'high' | 'xhigh';
@@ -93,9 +107,6 @@ export interface AgentRunRequest {
   skillId?: string;
 }
 
-import type { SkillDetail, SkillListItem } from './skills-types.js';
-export type { SkillDetail, SkillListItem } from './skills-types.js';
-
 // ---- 会话管理 ----
 
 /** 消息片段（按模型输出顺序排列，用于交错渲染思考/文本/工具调用） */
@@ -156,9 +167,13 @@ export interface SessionListItem {
 
 export type ThemeMode = 'light' | 'dark';
 
+export type Locale = 'zh' | 'en';
+
 export interface AppSettings {
   theme: ThemeMode;
   fontSize: number;
+  /** 界面语言 */
+  locale: Locale;
 }
 
 // ---- 文件浏览 ----
@@ -217,6 +232,9 @@ export interface KoderAPI {
   getSkills(): Promise<SkillListItem[]>;
   getSkill(id: string): Promise<SkillDetail | null>;
   reloadSkills(): Promise<SkillListItem[]>;
+  searchSkillHub(params: SkillHubSearchParams): Promise<SkillHubSearchResult>;
+  installSkillFromSkillHub(slug: string): Promise<SkillHubInstallResult>;
+  onSkillsChanged(cb: () => void): Unsubscribe;
 
   // 消息保存通知（主进程→渲染进程）
   onMessageSaved(cb: (payload: { sessionId: string }) => void): Unsubscribe;

@@ -1,0 +1,423 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { AgentConfig, AppSettings } from '../../shared/ipc';
+import { LOCALE_LABELS } from '../../shared/i18n';
+import type { Locale } from '../../shared/ipc';
+import { useI18n } from '../contexts/I18nContext';
+import { useTheme } from '../contexts/ThemeContext';
+
+export type SettingsTab = 'general' | 'model';
+
+const TAB_ORDER: SettingsTab[] = ['general', 'model'];
+
+interface Props {
+  initialTab: SettingsTab;
+  onClose: () => void;
+  onModelSaved?: () => void;
+}
+
+const IconX = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+  </svg>
+);
+
+export default function SettingsHub({ initialTab, onClose, onModelSaved }: Props) {
+  const { t, locale, setLocale, refreshSettings: refreshI18n } = useI18n();
+  const { settings, updateSettings, refreshSettings: refreshTheme } = useTheme();
+
+  const [tab, setTab] = useState<SettingsTab>(initialTab);
+  const [generalDraft, setGeneralDraft] = useState<AppSettings | null>(null);
+  const [generalSaving, setGeneralSaving] = useState(false);
+
+  const [config, setConfig] = useState<AgentConfig | null>(null);
+  const [modelSaving, setModelSaving] = useState(false);
+  const [showKey, setShowKey] = useState(false);
+  const [animDirection, setAnimDirection] = useState<'forward' | 'back'>('forward');
+  const tabRef = useRef(initialTab === 'model' ? 1 : 0);
+
+  useEffect(() => {
+    if (initialTab === 'general' || initialTab === 'model') {
+      setTab(initialTab);
+      tabRef.current = TAB_ORDER.indexOf(initialTab);
+    }
+  }, [initialTab]);
+
+  useEffect(() => {
+    if (settings) setGeneralDraft({ ...settings });
+  }, [settings]);
+
+  useEffect(() => {
+    if (tab === 'model' && !config) {
+      void window.koder.getAgentConfig().then(setConfig);
+    }
+  }, [tab, config]);
+
+  const switchTab = useCallback((next: SettingsTab) => {
+    const nextIdx = TAB_ORDER.indexOf(next);
+    const prevIdx = tabRef.current;
+    setAnimDirection(nextIdx >= prevIdx ? 'forward' : 'back');
+    tabRef.current = nextIdx;
+    setTab(next);
+  }, []);
+
+  const handleSaveGeneral = useCallback(async () => {
+    if (!generalDraft) return;
+    setGeneralSaving(true);
+    await updateSettings({
+      theme: generalDraft.theme,
+      fontSize: generalDraft.fontSize,
+      locale: generalDraft.locale,
+    });
+    if (generalDraft.locale !== locale) {
+      await setLocale(generalDraft.locale);
+    }
+    await refreshI18n();
+    await refreshTheme();
+    setGeneralSaving(false);
+    onClose();
+  }, [generalDraft, updateSettings, locale, setLocale, refreshI18n, refreshTheme, onClose]);
+
+  const handleSaveModel = useCallback(async () => {
+    if (!config) return;
+    setModelSaving(true);
+    await window.koder.updateAgentConfig(config);
+    setModelSaving(false);
+    onModelSaved?.();
+    onClose();
+  }, [config, onClose, onModelSaved]);
+
+  const handleOverlayClick = (e: React.MouseEvent) => {
+    if (e.target === e.currentTarget) onClose();
+  };
+
+  const tabs: { id: SettingsTab; label: string }[] = [
+    { id: 'general', label: t('settings.tab.general') },
+    { id: 'model', label: t('settings.tab.model') },
+  ];
+
+  return (
+    <div className="modal-overlay" onClick={handleOverlayClick}>
+      <div className="modal modal-lg settings-hub">
+        <div className="modal-header">
+          <h2>{t('settings.title')}</h2>
+          <button className="icon-btn" onClick={onClose} aria-label={t('common.close')}>
+            <IconX />
+          </button>
+        </div>
+
+        <div className="settings-hub-layout">
+          <nav className="settings-hub-tabs" role="tablist">
+            {tabs.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                role="tab"
+                aria-selected={tab === item.id}
+                className={`settings-hub-tab ${tab === item.id ? 'active' : ''}`}
+                onClick={() => switchTab(item.id)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </nav>
+
+          <div className="settings-hub-main">
+          <div className="settings-hub-panel settings-hub-panel-animated">
+            <div key={tab} className={`settings-hub-panel-content settings-hub-panel-${animDirection}`}>
+            {tab === 'general' && generalDraft && (
+              <div className="settings-section">
+                <div className="settings-section-title">{t('settings.general.appearance')}</div>
+
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-label">{t('settings.general.language')}</div>
+                    <div className="settings-label-desc">{t('settings.general.languageDesc')}</div>
+                  </div>
+                  <select
+                    className="settings-input"
+                    value={generalDraft.locale}
+                    onChange={(e) => {
+                      const next = e.target.value as Locale;
+                      setGeneralDraft({ ...generalDraft, locale: next });
+                      void setLocale(next);
+                    }}
+                    style={{ width: 140 }}
+                  >
+                    {(Object.keys(LOCALE_LABELS) as Locale[]).map((loc) => (
+                      <option key={loc} value={loc}>{LOCALE_LABELS[loc]}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-label">{t('settings.general.theme')}</div>
+                    <div className="settings-label-desc">{t('settings.general.themeDesc')}</div>
+                  </div>
+                  <div className="theme-toggle">
+                    <span className="theme-toggle-label">{t('sidebar.theme.light')}</span>
+                    <button
+                      type="button"
+                      className={`theme-toggle-switch ${generalDraft.theme === 'dark' ? 'active' : ''}`}
+                      onClick={() => setGeneralDraft({
+                        ...generalDraft,
+                        theme: generalDraft.theme === 'light' ? 'dark' : 'light',
+                      })}
+                    />
+                    <span className="theme-toggle-label">{t('sidebar.theme.dark')}</span>
+                  </div>
+                </div>
+
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-label">{t('settings.general.fontSize')}</div>
+                    <div className="settings-label-desc">{t('settings.general.fontSizeDesc')}</div>
+                  </div>
+                  <input
+                    className="settings-input"
+                    type="number"
+                    min={11}
+                    max={20}
+                    value={generalDraft.fontSize}
+                    onChange={(e) => setGeneralDraft({
+                      ...generalDraft,
+                      fontSize: Number(e.target.value) || 13,
+                    })}
+                    style={{ width: 80, textAlign: 'center' }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {tab === 'model' && config && (
+              <>
+                <div className="settings-section">
+                  <div className="settings-section-title">{t('settings.model.api')}</div>
+                  <div className="settings-row">
+                    <div>
+                      <div className="settings-label">{t('settings.model.apiKey')}</div>
+                      <div className="settings-label-desc">{t('settings.model.apiKeyDesc')}</div>
+                    </div>
+                    <div className="settings-row-browse">
+                      <input
+                        className="settings-input"
+                        type={showKey ? 'text' : 'password'}
+                        placeholder="sk-..."
+                        value={config.apiKey}
+                        onChange={(e) => setConfig({ ...config, apiKey: e.target.value })}
+                        style={{ minWidth: 220 }}
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() => setShowKey(!showKey)}
+                        style={{ padding: '6px 8px', fontSize: 11 }}
+                      >
+                        {showKey ? t('settings.model.hideKey') : t('settings.model.showKey')}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="settings-row">
+                    <div>
+                      <div className="settings-label">{t('settings.model.baseUrl')}</div>
+                      <div className="settings-label-desc">{t('settings.model.baseUrlDesc')}</div>
+                    </div>
+                    <input
+                      className="settings-input"
+                      type="text"
+                      placeholder="https://api.openai.com/v1"
+                      value={config.baseUrl}
+                      onChange={(e) => setConfig({ ...config, baseUrl: e.target.value })}
+                      style={{ minWidth: 260 }}
+                    />
+                  </div>
+                  <div className="settings-row">
+                    <div>
+                      <div className="settings-label">{t('settings.model.modelId')}</div>
+                      <div className="settings-label-desc">{t('settings.model.modelIdDesc')}</div>
+                    </div>
+                    <input
+                      className="settings-input"
+                      type="text"
+                      placeholder="gpt-4o"
+                      value={config.model}
+                      onChange={(e) => setConfig({ ...config, model: e.target.value })}
+                    />
+                  </div>
+                </div>
+
+                <div className="settings-section">
+                  <div className="settings-section-title">{t('settings.model.generation')}</div>
+                  <div className="settings-row">
+                    <div>
+                      <div className="settings-label">{t('settings.model.reasoning')}</div>
+                      <div className="settings-label-desc">{t('settings.model.reasoningDesc')}</div>
+                    </div>
+                    <select
+                      className="settings-input"
+                      value={config.reasoningEffort ?? 'medium'}
+                      onChange={(e) => setConfig({
+                        ...config,
+                        reasoningEffort: e.target.value as AgentConfig['reasoningEffort'],
+                      })}
+                      style={{ width: 140 }}
+                    >
+                      <option value="off">{t('settings.model.reasoning.off')}</option>
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                      <option value="xhigh">XHigh</option>
+                    </select>
+                  </div>
+                  <div className="settings-row">
+                    <div>
+                      <div className="settings-label">{t('settings.model.maxTokens')}</div>
+                      <div className="settings-label-desc">{t('settings.model.maxTokensDesc')}</div>
+                    </div>
+                    <input
+                      className="settings-input"
+                      type="number"
+                      min={256}
+                      max={128000}
+                      value={config.maxTokens}
+                      onChange={(e) => setConfig({ ...config, maxTokens: Number(e.target.value) || 4096 })}
+                      style={{ width: 100, textAlign: 'center' }}
+                    />
+                  </div>
+                  <div className="settings-row">
+                    <div>
+                      <div className="settings-label">{t('settings.model.temperature')}</div>
+                      <div className="settings-label-desc">{t('settings.model.temperatureDesc')}</div>
+                    </div>
+                    <input
+                      className="settings-input"
+                      type="number"
+                      min={0}
+                      max={2}
+                      step={0.1}
+                      value={config.temperature}
+                      onChange={(e) => setConfig({ ...config, temperature: Number(e.target.value) || 0.3 })}
+                      style={{ width: 80, textAlign: 'center' }}
+                    />
+                  </div>
+                  <div className="settings-row">
+                    <div>
+                      <div className="settings-label">{t('settings.model.maxContext')}</div>
+                      <div className="settings-label-desc">{t('settings.model.maxContextDesc')}</div>
+                    </div>
+                    <input
+                      className="settings-input"
+                      type="number"
+                      min={4096}
+                      max={1000000}
+                      step={1000}
+                      value={config.maxContextTokens}
+                      onChange={(e) => setConfig({
+                        ...config,
+                        maxContextTokens: Number(e.target.value) || 200000,
+                      })}
+                      style={{ width: 120, textAlign: 'center' }}
+                    />
+                  </div>
+                </div>
+
+                <div className="settings-section">
+                  <div className="settings-section-title">{t('settings.model.cache')}</div>
+                  <div className="settings-row">
+                    <div>
+                      <div className="settings-label">{t('settings.model.promptCache')}</div>
+                      <div className="settings-label-desc">{t('settings.model.promptCacheDesc')}</div>
+                    </div>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={config.promptCacheEnabled ?? true}
+                        onChange={(e) => setConfig({ ...config, promptCacheEnabled: e.target.checked })}
+                      />
+                      <span>
+                        {config.promptCacheEnabled ? t('settings.model.enabled') : t('settings.model.disabled')}
+                      </span>
+                    </label>
+                  </div>
+                  <div className="settings-row">
+                    <div>
+                      <div className="settings-label">{t('settings.model.toolCache')}</div>
+                      <div className="settings-label-desc">{t('settings.model.toolCacheDesc')}</div>
+                    </div>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={config.toolCacheEnabled ?? true}
+                        onChange={(e) => setConfig({ ...config, toolCacheEnabled: e.target.checked })}
+                      />
+                      <span>
+                        {config.toolCacheEnabled ? t('settings.model.enabled') : t('settings.model.disabled')}
+                      </span>
+                    </label>
+                  </div>
+                  <div className="settings-row">
+                    <div>
+                      <div className="settings-label">{t('settings.model.toolCacheMax')}</div>
+                      <div className="settings-label-desc">{t('settings.model.toolCacheMaxDesc')}</div>
+                    </div>
+                    <input
+                      className="settings-input"
+                      type="number"
+                      min={50}
+                      max={2000}
+                      value={config.toolCacheMaxEntries ?? 300}
+                      onChange={(e) => setConfig({
+                        ...config,
+                        toolCacheMaxEntries: Number(e.target.value) || 300,
+                      })}
+                      style={{ width: 100, textAlign: 'center' }}
+                      disabled={!config.toolCacheEnabled}
+                    />
+                  </div>
+                </div>
+
+                <div className="settings-section">
+                  <div className="settings-section-title">{t('settings.model.systemPrompt')}</div>
+                  <textarea
+                    className="composer-textarea"
+                    rows={5}
+                    value={config.systemPrompt}
+                    onChange={(e) => setConfig({ ...config, systemPrompt: e.target.value })}
+                    style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
+                  />
+                </div>
+              </>
+            )}
+
+            </div>
+          </div>
+
+          <div className="settings-hub-footer">
+            <button type="button" className="btn btn-ghost" onClick={onClose}>{t('settings.cancel')}</button>
+            {tab === 'general' && (
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => void handleSaveGeneral()}
+                disabled={generalSaving || !generalDraft}
+              >
+                {generalSaving ? t('settings.saving') : t('settings.save')}
+              </button>
+            )}
+            {tab === 'model' && (
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => void handleSaveModel()}
+                disabled={modelSaving || !config}
+              >
+                {modelSaving ? t('settings.saving') : t('settings.saveModel')}
+              </button>
+            )}
+          </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

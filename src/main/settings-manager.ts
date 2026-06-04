@@ -9,6 +9,7 @@ import type { AppSettings } from '../shared/ipc.js';
 const DEFAULTS: AppSettings = {
   theme: 'light',
   fontSize: 13,
+  locale: 'zh',
 };
 
 export class SettingsManager {

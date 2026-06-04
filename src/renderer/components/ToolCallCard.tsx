@@ -68,10 +68,10 @@ function FilePreview({
   fileInfo: ReturnType<typeof parseFileContent>;
   lineCount: number;
 }) {
-  const scrollRef = useRef<HTMLPreElement>(null);
   const { path: filePath, content: fileContent, anchor: insertAnchor, action: insertAction } = fileInfo;
   const isStreaming = toolCall.status === 'running';
   const outputStats = parseOutputStats(toolCall.output);
+  const lang = filePath ? detectLanguageFromPath(filePath) : undefined;
 
   const MAX_PREVIEW = 50_000;
   const previewContent = fileContent.length > MAX_PREVIEW
@@ -81,12 +81,6 @@ function FilePreview({
   const displayLines = toolCall.status === 'done' && outputStats.lines != null
     ? outputStats.lines
     : lineCount;
-
-  useEffect(() => {
-    if (isStreaming && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [previewContent, isStreaming]);
 
   return (
     <div className="tool-card-section">
@@ -102,10 +96,14 @@ function FilePreview({
             锚点: &quot;{insertAnchor.slice(0, 60)}&quot; · 操作: {insertAction}
           </div>
         )}
-        <pre ref={scrollRef} className="tool-card-code tool-card-file-content tool-card-file-content-live">
-          <code>{previewContent || (isStreaming ? '' : '(无内容)')}</code>
+        <div className="tool-card-file-content-live">
+          {previewContent ? (
+            <CodeBlock language={lang} compact>{previewContent}</CodeBlock>
+          ) : (
+            <span className="tool-card-empty">{isStreaming ? '等待内容…' : '(无内容)'}</span>
+          )}
           {isStreaming && <span className="streaming-cursor" />}
-        </pre>
+        </div>
         <div className="tool-card-file-info">
           <span>
             {displayLines > 0 ? `${displayLines} 行 · ` : ''}
@@ -244,12 +242,12 @@ export default function ToolCallCard({ toolCall }: Props) {
           {toolCall.output && (
             <div className="tool-card-section">
               <div className="tool-card-section-label">执行结果</div>
-              <pre className="tool-card-code tool-card-output">{toolCall.output}</pre>
+              <CodeBlock compact>{toolCall.output}</CodeBlock>
             </div>
           )}
           <div className="tool-card-section">
             <div className="tool-card-section-label">原始输入</div>
-            <pre className="tool-card-code">{toolCall.input}</pre>
+            <CodeBlock compact language="json">{toolCall.input}</CodeBlock>
           </div>
         </div>
       )}

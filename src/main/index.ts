@@ -12,7 +12,10 @@ import { SettingsManager } from './settings-manager.js';
 import { ConfigManager } from './config-manager.js';
 import { AgentEngine } from './agent-engine.js';
 import { globalSkillsManager } from './skills-manager.js';
+import { installSkillFromSkillHub } from './skills-installer.js';
+import { searchSkillHub } from './skillhub-client.js';
 import { parseSlashCommand } from '../shared/skills-types.js';
+import type { SkillHubSearchParams } from '../shared/skillhub-types.js';
 import type {
   AgentConfig,
   AgentEvent,
@@ -382,13 +385,29 @@ ipcMain.on('preload:error', (_event, message: string) => {
 
 // ---- IPC: Skills ----
 
+function broadcastSkillsChanged(): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send('skills:changed');
+  }
+}
+
 ipcMain.handle('skills:list', () => globalSkillsManager.list());
 
 ipcMain.handle('skills:get', (_event, id: string) => globalSkillsManager.get(id));
 
 ipcMain.handle('skills:reload', () => {
   globalSkillsManager.reload();
-  return globalSkillsManager.list();
+  const list = globalSkillsManager.list();
+  broadcastSkillsChanged();
+  return list;
+});
+
+ipcMain.handle('skillhub:search', (_event, params: SkillHubSearchParams) => searchSkillHub(params));
+
+ipcMain.handle('skillhub:install', async (_event, slug: string) => {
+  const result = await installSkillFromSkillHub(slug);
+  if (result.ok) broadcastSkillsChanged();
+  return result;
 });
 
 // ---- App lifecycle ----

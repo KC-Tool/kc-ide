@@ -13,13 +13,22 @@ interface Props {
   selectedIndex: number;
   onSelect: (item: SlashMenuItem) => void;
   visible: boolean;
+  kindLabels?: { cmd: string; skill: string };
 }
 
-export function buildSlashMenuItems(skills: SkillListItem[], filter: string): SlashMenuItem[] {
+export function buildSlashMenuItems(
+  skills: SkillListItem[],
+  filter: string,
+  labels?: { skillsDesc: string; helpDesc: string; skillUsePrefix: string },
+): SlashMenuItem[] {
   const q = filter.toLowerCase().replace(/^\//, '');
+  const skillsDesc = labels?.skillsDesc ?? 'List skills';
+  const helpDesc = labels?.helpDesc ?? 'Help';
+  const skillUsePrefix = labels?.skillUsePrefix ?? 'Skill:';
+
   const base: SlashMenuItem[] = [
-    { id: 'skills', label: '/skills', description: '列出所有可用 Skills', insertText: '/skills ', kind: 'command' },
-    { id: 'help', label: '/help', description: 'Slash 命令帮助', insertText: '/help ', kind: 'command' },
+    { id: 'skills', label: '/skills', description: skillsDesc, insertText: '/skills ', kind: 'command' },
+    { id: 'help', label: '/help', description: helpDesc, insertText: '/help ', kind: 'command' },
   ];
 
   for (const s of skills) {
@@ -33,7 +42,7 @@ export function buildSlashMenuItems(skills: SkillListItem[], filter: string): Sl
     base.push({
       id: `skill-${s.id}`,
       label: `/skill ${s.id}`,
-      description: `使用 Skill: ${s.name}`,
+      description: `${skillUsePrefix} ${s.name}`,
       insertText: `/skill ${s.id} `,
       kind: 'skill',
     });
@@ -49,7 +58,7 @@ export function buildSlashMenuItems(skills: SkillListItem[], filter: string): Sl
   ).slice(0, 12);
 }
 
-export default function SlashCommandMenu({ items, selectedIndex, onSelect, visible }: Props) {
+export default function SlashCommandMenu({ items, selectedIndex, onSelect, visible, kindLabels }: Props) {
   if (!visible || items.length === 0) return null;
 
   return (
@@ -67,7 +76,7 @@ export default function SlashCommandMenu({ items, selectedIndex, onSelect, visib
           }}
         >
           <span className={`slash-menu-kind slash-menu-kind-${item.kind}`}>
-            {item.kind === 'skill' ? 'Skill' : 'Cmd'}
+            {item.kind === 'skill' ? (kindLabels?.skill ?? 'Skill') : (kindLabels?.cmd ?? 'Cmd')}
           </span>
           <span className="slash-menu-label">{item.label}</span>
           <span className="slash-menu-desc">{item.description}</span>
