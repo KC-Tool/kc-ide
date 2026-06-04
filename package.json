@@ -1,0 +1,49 @@
+{
+  "name": "koder",
+  "version": "0.1.0",
+  "description": "Koder — 基于本地 Codex CLI 的桌面端 AI 编程助手",
+  "main": "electron-shim.cjs",
+  "author": "koder",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "koder",
+    "codex",
+    "electron",
+    "ai",
+    "copilot"
+  ],
+  "scripts": {
+    "dev:renderer": "vite",
+    "dev:electron": "wait-on tcp:5173 && cross-env KODER_DEV=1 electron .",
+    "dev": "concurrently -k -n vite,electron -c blue,magenta \"pnpm dev:renderer\" \"pnpm dev:electron\"",
+    "build:renderer": "vite build",
+    "build:check": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "test:codex": "tsx scripts/test-codex.ts",
+    "build": "pnpm build:renderer",
+    "package": "pnpm build && electron-builder",
+    "package:dir": "pnpm build && electron-builder --dir"
+  },
+  "pnpm": {},
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "@types/react": "^19.2.16",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "concurrently": "^10.0.3",
+    "cross-env": "^10.1.0",
+    "electron": "^42.3.0",
+    "electron-builder": "^26.8.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16",
+    "wait-on": "^8.0.5"
+  },
+  "dependencies": {
+    "highlight.js": "^11.11.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  }
+}
