@@ -10,6 +10,7 @@ const DEFAULTS: AppSettings = {
   theme: 'light',
   fontSize: 13,
   locale: 'zh',
+  dismissedTemporalNotice: false,
 };
 
 export class SettingsManager {

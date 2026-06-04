@@ -3,8 +3,12 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { AgentEvent, ChatMessage, FileSnapshot, MessageSegment, Session, Unsubscribe } from '../../shared/ipc';
 import type { SkillListItem } from '../../shared/skills-types';
-import { formatHelpLocalized, formatSkillsListLocalized } from '../../shared/i18n';
+import { formatAtHelpLocalized, formatHelpLocalized, formatSkillsListLocalized, formatTeamsListLocalized } from '../../shared/i18n';
 import { parseSlashCommand } from '../../shared/skills-types';
+import { buildAtMenuItems, parseAtCommand } from '../../shared/team-types';
+import type { TeamListItem, TodoItem } from '../../shared/ipc';
+import TodoPanel from './TodoPanel';
+import SubAgentPanel, { type SubAgentRun } from './SubAgentPanel';
 import { useI18n } from '../contexts/I18nContext';
 import CodeBlock from './CodeBlock';
 import ToolCallCard from './ToolCallCard';
@@ -297,8 +301,13 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
   // 上下文详情面板展开状态
   const [showContextDetail, setShowContextDetail] = useState(false);
   const [skills, setSkills] = useState<SkillListItem[]>([]);
+  const [teams, setTeams] = useState<TeamListItem[]>([]);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
+  const [atMenuOpen, setAtMenuOpen] = useState(false);
   const [slashSelected, setSlashSelected] = useState(0);
+  const [todos, setTodos] = useState<TodoItem[]>([]);
+  const [todoPanelCollapsed, setTodoPanelCollapsed] = useState(false);
+  const [subagentRuns, setSubagentRuns] = useState<SubAgentRun[]>([]);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const messagesRef = useRef<UiMessage[]>(uiMessages);
@@ -337,24 +346,77 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
     return window.koder.onSkillsChanged(reloadSkills);
   }, [reloadSkills]);
 
+  const reloadTeams = useCallback(() => {
+    void window.koder.getTeams().then(setTeams);
+  }, []);
+
+  useEffect(() => {
+    reloadTeams();
+    return window.koder.onTeamsChanged(reloadTeams);
+  }, [reloadTeams]);
+
   useEffect(() => {
     if (input.startsWith('/')) reloadSkills();
   }, [input, reloadSkills]);
 
-  const slashFilter = input.startsWith('/') ? input : '';
+  const slashFilter = input.startsWith('/') && !input.startsWith('//') ? input : '';
+  const atFilter = input.startsWith('@') ? input : '';
   const slashMenuItems = buildSlashMenuItems(skills, slashFilter, {
     skillsDesc: t('slash.skills.desc'),
     helpDesc: t('slash.help.desc'),
     skillUsePrefix: t('slash.skill'),
   });
+  const atMenuItems = buildAtMenuItems(teams, atFilter, {
+    teamsDesc: t('at.teams.desc'),
+    helpDesc: t('at.help.desc'),
+    createTeamDesc: t('at.createTeam.desc'),
+    teamUsePrefix: t('at.team'),
+  });
+
+  const commandMenuOpen = slashMenuOpen || atMenuOpen;
+  const commandMenuItems = atMenuOpen ? atMenuItems : slashMenuItems;
 
   useEffect(() => {
     setSlashSelected(0);
-  }, [slashFilter]);
+  }, [slashFilter, atFilter]);
 
   useEffect(() => {
-    setSlashMenuOpen(input.startsWith('/') && slashMenuItems.length > 0);
-  }, [input, slashMenuItems.length]);
+    if (input.startsWith('@')) {
+      setSlashMenuOpen(false);
+      setAtMenuOpen(atMenuItems.length > 0);
+    } else if (input.startsWith('/')) {
+      setAtMenuOpen(false);
+      setSlashMenuOpen(slashMenuItems.length > 0);
+    } else {
+      setSlashMenuOpen(false);
+      setAtMenuOpen(false);
+    }
+  }, [input, atMenuItems.length, slashMenuItems.length]);
+
+  useEffect(() => {
+    if (input.startsWith('@')) void reloadTeams();
+  }, [input, reloadTeams]);
+
+  const loadTodos = useCallback(async () => {
+    if (!session) {
+      setTodos([]);
+      return;
+    }
+    const list = await window.koder.getSessionTodos(session.id);
+    setTodos(list);
+  }, [session]);
+
+  useEffect(() => {
+    void loadTodos();
+  }, [loadTodos]);
+
+  useEffect(() => {
+    if (!session) return;
+    const unsubTodos = window.koder.onSessionTodosChanged(({ sessionId }) => {
+      if (sessionId === session.id) void loadTodos();
+    });
+    return unsubTodos;
+  }, [session, loadTodos]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
@@ -398,31 +460,84 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
   const handleSlashSelect = useCallback((item: SlashMenuItem) => {
     setInput(item.insertText);
     setSlashMenuOpen(false);
+    setAtMenuOpen(false);
     textareaRef.current?.focus();
     autoResize();
   }, [autoResize]);
+
+  const handleToggleTodo = useCallback(async (todoId: string) => {
+    if (!session) return;
+    const next = await window.koder.toggleSessionTodo(session.id, todoId);
+    setTodos(next);
+  }, [session]);
 
   const handleSubmit = useCallback(async () => {
     const prompt = input.trim();
     if (!prompt || running || !session) return;
 
+    const teamIds = teams.map(t => t.id);
+    const atParsed = parseAtCommand(prompt, teamIds);
     const skillIds = skills.map(s => s.id);
-    const parsed = parseSlashCommand(prompt, skillIds);
 
     setInput('');
     setSlashMenuOpen(false);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
 
-    if (parsed.type === 'list_skills') {
+    if (atParsed.type === 'list_teams') {
+      await appendSystemInfo(formatTeamsListLocalized(locale, teams));
+      return;
+    }
+    if (atParsed.type === 'list_help') {
+      await appendSystemInfo(formatAtHelpLocalized(locale));
+      return;
+    }
+    if (atParsed.type === 'activate_team') {
+      await window.koder.updateSession(session.id, { activeTeamId: atParsed.teamId });
+      onWorkspaceChange();
+      const team = teams.find(t => t.id === atParsed.teamId);
+      await appendSystemInfo(
+        locale === 'en'
+          ? `Agent Team **${team?.name ?? atParsed.teamId}** activated for this session.`
+          : `已为本会话激活 Agent Team：**${team?.name ?? atParsed.teamId}**（\`${atParsed.teamId}\`）`,
+      );
+      if (!atParsed.userMessage.trim()) return;
+    }
+
+    let agentPrompt = atParsed.type === 'activate_team' ? atParsed.userMessage : prompt;
+    const createTeam = atParsed.type === 'create_team';
+    if (createTeam) {
+      agentPrompt = atParsed.userMessage || (locale === 'en' ? 'Create a software dev agent team.' : '创建一个适合软件开发的多角色 Agent Team。');
+    }
+
+    const parsed = parseSlashCommand(createTeam ? '' : agentPrompt, skillIds);
+
+    if (!createTeam && parsed.type === 'list_skills') {
       await appendSystemInfo(formatSkillsListLocalized(locale, skills));
       return;
     }
-    if (parsed.type === 'list_help') {
+    if (!createTeam && parsed.type === 'list_help') {
       await appendSystemInfo(formatHelpLocalized(locale));
       return;
     }
 
+    let runPrompt = agentPrompt;
+    let activeSkillId: string | undefined;
+    if (!createTeam && parsed.type === 'invoke_skill' && parsed.skillId) {
+      activeSkillId = parsed.skillId;
+      runPrompt = parsed.userMessage || (locale === 'en' ? 'Follow the skill instructions.' : '请按照该 Skill 的指引完成任务。');
+    }
+
+    const activeTeamId =
+      atParsed.type === 'activate_team' ? atParsed.teamId : session.activeTeamId;
+
+    const displayPrompt = createTeam
+      ? `@create-team ${agentPrompt}`
+      : atParsed.type === 'activate_team'
+        ? `@team ${atParsed.teamId} ${agentPrompt}`.trim()
+        : prompt;
+
     setRunning(true);
+    setSubagentRuns([]);
     currentToolCalls.current = [];
 
     const now = Date.now();
@@ -431,7 +546,7 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
     currentAssistantId.current = assistantMsgId;
 
     const userMsg: UiMessage = {
-      id: userMsgId, role: 'user', text: prompt, timestamp: now, toolCalls: [], thinkingSegments: [], segments: [],
+      id: userMsgId, role: 'user', text: displayPrompt, timestamp: now, toolCalls: [], thinkingSegments: [], segments: [],
     };
     const assistantMsg: UiMessage = {
       id: assistantMsgId, role: 'assistant', text: '', timestamp: now + 1, toolCalls: [], streaming: true, thinkingSegments: [], segments: [],
@@ -439,17 +554,62 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
 
     setUiMessages((prev) => [...prev, userMsg, assistantMsg]);
 
-    await onAddMessage({ id: userMsgId, role: 'user', text: prompt, timestamp: now });
+    await onAddMessage({ id: userMsgId, role: 'user', text: displayPrompt, timestamp: now });
 
     try {
       const { sessionId, unsubscribe: unsub } = await window.koder.runAgent(
         {
           sessionId: session.id,
-          prompt,
+          prompt: runPrompt,
           cwd: session.cwd || undefined,
-          skillId: parsed.type === 'invoke_skill' ? parsed.skillId : undefined,
+          skillId: activeSkillId,
+          teamId: activeTeamId,
+          createTeam,
         },
         (e: AgentEvent) => {
+          if (e.type === 'subagent_start' && e.subagent) {
+            setSubagentRuns((prev) => [
+              ...prev,
+              {
+                key: `${e.subagent!.memberId}-${Date.now()}`,
+                memberId: e.subagent!.memberId,
+                memberName: e.subagent!.memberName,
+                task: e.subagent!.task ?? e.data ?? '',
+                output: '',
+                running: true,
+              },
+            ]);
+            return;
+          }
+          if (e.type === 'subagent_text_delta' && e.subagent) {
+            const mid = e.subagent.memberId;
+            setSubagentRuns((prev) => {
+              const idx = [...prev].reverse().findIndex(r => r.memberId === mid && r.running);
+              if (idx === -1) return prev;
+              const realIdx = prev.length - 1 - idx;
+              return prev.map((r, i) =>
+                i === realIdx ? { ...r, output: r.output + (e.data ?? '') } : r,
+              );
+            });
+            return;
+          }
+          if (e.type === 'subagent_done' && e.subagent) {
+            const mid = e.subagent.memberId;
+            setSubagentRuns((prev) => {
+              const idx = [...prev].reverse().findIndex(r => r.memberId === mid && r.running);
+              if (idx === -1) return prev;
+              const realIdx = prev.length - 1 - idx;
+              return prev.map((r, i) =>
+                i === realIdx
+                  ? { ...r, running: false, output: e.subagent!.output ?? r.output }
+                  : r,
+              );
+            });
+            return;
+          }
+
+          if (e.subagent) return;
+
           if (e.type === 'text_delta') {
             setUiMessages((prev) =>
               prev.map((m) => {
@@ -532,6 +692,7 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
                 return { ...m, ...patchFromSegments(segments) };
               }),
             );
+            if (e.todosChanged) void loadTodos();
           } else if (e.type === 'error') {
             setUiMessages((prev) =>
               prev.map((m) => {
@@ -670,24 +831,25 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
   }, []);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (slashMenuOpen && slashMenuItems.length > 0) {
+    if (commandMenuOpen && commandMenuItems.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
-        setSlashSelected(i => (i + 1) % slashMenuItems.length);
+        setSlashSelected(i => (i + 1) % commandMenuItems.length);
         return;
       }
       if (e.key === 'ArrowUp') {
         e.preventDefault();
-        setSlashSelected(i => (i - 1 + slashMenuItems.length) % slashMenuItems.length);
+        setSlashSelected(i => (i - 1 + commandMenuItems.length) % commandMenuItems.length);
         return;
       }
       if (e.key === 'Tab' || (e.key === 'Enter' && !e.ctrlKey && !e.metaKey)) {
         e.preventDefault();
-        handleSlashSelect(slashMenuItems[slashSelected]);
+        handleSlashSelect(commandMenuItems[slashSelected]);
         return;
       }
       if (e.key === 'Escape') {
         setSlashMenuOpen(false);
+        setAtMenuOpen(false);
         return;
       }
     }
@@ -802,7 +964,13 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
             {session?.cwd && (
               <span className="workspace-path" title={session.cwd}>{session.cwd}</span>
             )}
+            {session?.activeTeamId && (
+              <span className="active-team-badge" title={session.activeTeamId}>
+                Team: {session.activeTeamId}
+              </span>
+            )}
           </div>
+          <SubAgentPanel runs={subagentRuns} />
           {/* 上下文占用指示器 */}
           {contextUsage.current > 0 && (
             <div className="context-usage-section">
@@ -879,13 +1047,20 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
               )}
             </div>
           )}
+          <TodoPanel
+            todos={todos}
+            sessionId={session?.id ?? null}
+            onToggle={(id) => { void handleToggleTodo(id); }}
+            collapsed={todoPanelCollapsed}
+            onToggleCollapse={() => setTodoPanelCollapsed(c => !c)}
+          />
           <div className="composer-input-wrap">
             <SlashCommandMenu
-              items={slashMenuItems}
+              items={commandMenuItems}
               selectedIndex={slashSelected}
               onSelect={handleSlashSelect}
-              visible={slashMenuOpen}
-              kindLabels={{ cmd: t('slash.cmd'), skill: t('slash.skill') }}
+              visible={commandMenuOpen}
+              kindLabels={{ cmd: t('slash.cmd'), skill: t('slash.skill'), team: t('at.team') }}
             />
             <textarea
               ref={textareaRef}

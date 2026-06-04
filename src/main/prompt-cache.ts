@@ -1,6 +1,7 @@
 // API Prompt 缓存优化 — 静态前缀分离 + cache_control 断点，提高 provider 端命中率
 
 import type { AgentConfig } from '../shared/ipc.js';
+import { getTemporalAnchorWorkspaceLine } from './temporal-anchor.js';
 import { buildPromptCacheKey, stableToolsJson } from './tool-cache.js';
 import { TOOL_DEFINITIONS } from './tools.js';
 
@@ -38,12 +39,12 @@ export function buildCacheOptimizedMessages(
     // 动态 cwd 独立消息，避免污染 system 静态前缀
     messages.push({
       role: 'user',
-      content: `[Workspace Context]\nCurrent working directory: ${cwd}`,
+      content: `[Workspace Context]\nCurrent working directory: ${cwd}\n${getTemporalAnchorWorkspaceLine()}`,
     });
   } else {
     messages.push({
       role: 'system',
-      content: `${config.systemPrompt}\n\nCurrent working directory: ${cwd}`,
+      content: `${config.systemPrompt}\n\nCurrent working directory: ${cwd}\n${getTemporalAnchorWorkspaceLine()}`,
     });
   }
 
@@ -106,11 +107,12 @@ export function buildApiRequestBody(
   config: AgentConfig,
   messages: ApiMessage[],
   cwd: string,
+  tools: typeof TOOL_DEFINITIONS = TOOL_DEFINITIONS,
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: config.model,
     messages,
-    tools: TOOL_DEFINITIONS,
+    tools,
     stream: true,
     max_tokens: config.maxTokens,
     temperature: config.temperature,
@@ -129,7 +131,7 @@ export function buildApiRequestBody(
   }
 
   // 稳定 tools 序列化顺序（调试用，body 已用对象）
-  void stableToolsJson(TOOL_DEFINITIONS);
+  void stableToolsJson(tools);
 
   return body;
 }

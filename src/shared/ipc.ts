@@ -7,6 +7,13 @@ import type {
   SkillHubSearchParams,
   SkillHubSearchResult,
 } from './skillhub-types.js';
+import type {
+  AgentTeam,
+  TeamDeleteResult,
+  TeamListItem,
+  TeamSaveResult,
+} from './team-types.js';
+import type { TodoItem } from './todo-types.js';
 export type { SkillDetail, SkillListItem } from './skills-types.js';
 export type {
   SkillHubInstallResult,
@@ -60,12 +67,21 @@ export interface ToolResult {
 // ---- Agent 事件 ----
 
 export interface AgentEvent {
-  type: 'text_delta' | 'thinking_delta' | 'tool_call_delta' | 'tool_call_start' | 'tool_result' | 'error' | 'done' | 'context_usage';
+  type: 'text_delta' | 'thinking_delta' | 'tool_call_delta' | 'tool_call_start' | 'tool_result' | 'error' | 'done' | 'context_usage' | 'subagent_start' | 'subagent_text_delta' | 'subagent_done';
   data?: string;
   toolCall?: ToolCallInfo;
   toolResult?: ToolResult;
   sessionId?: string;
   ts: number;
+  /** todo 工具更新后会话待办已变更 */
+  todosChanged?: boolean;
+  /** 子 Agent 委派上下文 */
+  subagent?: {
+    memberId: string;
+    memberName: string;
+    task?: string;
+    output?: string;
+  };
   /** 上下文占用（token 数），含分段明细 */
   usage?: {
     promptTokens: number;
@@ -105,6 +121,9 @@ export interface AgentRunRequest {
   cwd?: string;
   /** 显式指定要激活的 Skill（也可由 slash 命令解析） */
   skillId?: string;
+  /** 显式指定 Team，或 @create-team 模式 */
+  teamId?: string;
+  createTeam?: boolean;
 }
 
 // ---- 会话管理 ----
@@ -152,6 +171,10 @@ export interface Session {
   updatedAt: number;
   cwd?: string;
   model?: string;
+  /** 当前会话激活的 Agent Team */
+  activeTeamId?: string;
+  /** 会话待办列表 */
+  todos?: TodoItem[];
   /** 每轮 assistant 回复对应的文件快照（key = assistant message id） */
   fileSnapshots?: Record<string, FileSnapshot[]>;
 }
@@ -161,6 +184,26 @@ export interface SessionListItem {
   title: string;
   updatedAt: number;
   messageCount: number;
+  cwd?: string;
+  /** 工作区文件夹显示名（目录 basename） */
+  cwdLabel?: string;
+  /** ~/.koder/session/ 下的子目录名 */
+  storageFolder: string;
+  /** 侧边栏仓库分组显示名 */
+  repoLabel: string;
+}
+
+/** 按工作区分组的会话树（侧边栏） */
+export interface SessionRepoGroup {
+  cwd?: string;
+  storageFolder: string;
+  repoLabel: string;
+  sessions: SessionListItem[];
+}
+
+export interface SkillDeleteResult {
+  ok: boolean;
+  error?: string;
 }
 
 // ---- 设置 ----
@@ -174,7 +217,21 @@ export interface AppSettings {
   fontSize: number;
   /** 界面语言 */
   locale: Locale;
+  /** 已确认时间锚点说明弹窗 */
+  dismissedTemporalNotice?: boolean;
+  /** 新会话默认激活的 Agent Team */
+  defaultTeamId?: string;
 }
+
+export type {
+  AgentTeam,
+  TeamDeleteResult,
+  TeamListItem,
+  TeamMember,
+  TeamSaveResult,
+  TeamSource,
+} from './team-types.js';
+export type { TodoItem } from './todo-types.js';
 
 // ---- 文件浏览 ----
 
@@ -212,10 +269,23 @@ export interface KoderAPI {
   // 会话
   getSessions(): Promise<SessionListItem[]>;
   getSession(id: string): Promise<Session | null>;
-  createSession(): Promise<Session>;
+  createSession(cwd?: string): Promise<Session>;
+  getSessionRepoTree(): Promise<SessionRepoGroup[]>;
   deleteSession(id: string): Promise<void>;
   addMessage(sessionId: string, msg: ChatMessage): Promise<void>;
-  updateSession(sessionId: string, patch: Partial<Pick<Session, 'title' | 'cwd' | 'model'>>): Promise<void>;
+  updateSession(sessionId: string, patch: Partial<Pick<Session, 'title' | 'cwd' | 'model' | 'activeTeamId'>>): Promise<void>;
+
+  // Agent Teams
+  getTeams(): Promise<TeamListItem[]>;
+  getTeam(id: string): Promise<AgentTeam | null>;
+  saveTeam(team: AgentTeam): Promise<TeamSaveResult>;
+  deleteTeam(id: string): Promise<TeamDeleteResult>;
+  reloadTeams(): Promise<TeamListItem[]>;
+  onTeamsChanged(cb: () => void): Unsubscribe;
+
+  getSessionTodos(sessionId: string): Promise<TodoItem[]>;
+  toggleSessionTodo(sessionId: string, todoId: string, done?: boolean): Promise<TodoItem[]>;
+  onSessionTodosChanged(cb: (payload: { sessionId: string }) => void): Unsubscribe;
 
   // 设置
   getSettings(): Promise<AppSettings>;
@@ -234,6 +304,7 @@ export interface KoderAPI {
   reloadSkills(): Promise<SkillListItem[]>;
   searchSkillHub(params: SkillHubSearchParams): Promise<SkillHubSearchResult>;
   installSkillFromSkillHub(slug: string): Promise<SkillHubInstallResult>;
+  deleteSkill(id: string): Promise<SkillDeleteResult>;
   onSkillsChanged(cb: () => void): Unsubscribe;
 
   // 消息保存通知（主进程→渲染进程）

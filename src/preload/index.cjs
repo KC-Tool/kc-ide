@@ -11,6 +11,8 @@ try {
   // agent:message_saved 监听器管理
   const messageSavedListeners = new Set();
   const skillsChangedListeners = new Set();
+  const teamsChangedListeners = new Set();
+  const sessionTodosChangedListeners = new Set();
 
   ipcRenderer.on('agent:event', (_event, payload) => {
     for (const cb of agentListeners) {
@@ -42,6 +44,26 @@ try {
     }
   });
 
+  ipcRenderer.on('teams:changed', () => {
+    for (const cb of teamsChangedListeners) {
+      try {
+        cb();
+      } catch (err) {
+        console.error('[koder preload] teamsChanged listener error', err);
+      }
+    }
+  });
+
+  ipcRenderer.on('session:todos_changed', (_event, payload) => {
+    for (const cb of sessionTodosChangedListeners) {
+      try {
+        cb(payload);
+      } catch (err) {
+        console.error('[koder preload] sessionTodosChanged listener error', err);
+      }
+    }
+  });
+
   contextBridge.exposeInMainWorld('koder', {
     // ---- 应用信息 ----
     getAppInfo: () => ipcRenderer.invoke('app:info'),
@@ -64,8 +86,9 @@ try {
 
     // ---- 会话管理 ----
     getSessions: () => ipcRenderer.invoke('session:list'),
+    getSessionRepoTree: () => ipcRenderer.invoke('session:repoTree'),
     getSession: (id) => ipcRenderer.invoke('session:get', id),
-    createSession: () => ipcRenderer.invoke('session:create'),
+    createSession: (cwd) => ipcRenderer.invoke('session:create', cwd),
     deleteSession: (id) => ipcRenderer.invoke('session:delete', id),
     addMessage: (sessionId, msg) => ipcRenderer.invoke('session:addMessage', sessionId, msg),
     updateSession: (sessionId, patch) => ipcRenderer.invoke('session:update', sessionId, patch),
@@ -87,9 +110,29 @@ try {
     reloadSkills: () => ipcRenderer.invoke('skills:reload'),
     searchSkillHub: (params) => ipcRenderer.invoke('skillhub:search', params),
     installSkillFromSkillHub: (slug) => ipcRenderer.invoke('skillhub:install', slug),
+    deleteSkill: (id) => ipcRenderer.invoke('skills:delete', id),
     onSkillsChanged: (cb) => {
       skillsChangedListeners.add(cb);
       return () => skillsChangedListeners.delete(cb);
+    },
+
+    // ---- Agent Teams ----
+    getTeams: () => ipcRenderer.invoke('teams:list'),
+    getTeam: (id) => ipcRenderer.invoke('teams:get', id),
+    saveTeam: (team) => ipcRenderer.invoke('teams:save', team),
+    deleteTeam: (id) => ipcRenderer.invoke('teams:delete', id),
+    reloadTeams: () => ipcRenderer.invoke('teams:reload'),
+    onTeamsChanged: (cb) => {
+      teamsChangedListeners.add(cb);
+      return () => teamsChangedListeners.delete(cb);
+    },
+
+    getSessionTodos: (sessionId) => ipcRenderer.invoke('session:getTodos', sessionId),
+    toggleSessionTodo: (sessionId, todoId, done) =>
+      ipcRenderer.invoke('session:toggleTodo', sessionId, todoId, done),
+    onSessionTodosChanged: (cb) => {
+      sessionTodosChangedListeners.add(cb);
+      return () => sessionTodosChangedListeners.delete(cb);
     },
 
     // ---- 消息保存通知 ----
@@ -120,6 +163,7 @@ try {
       runAgent: reject('preload 初始化失败'),
       cancelAgent: reject('preload 初始化失败'),
       getSessions: reject('preload 初始化失败'),
+      getSessionRepoTree: reject('preload 初始化失败'),
       getSession: reject('preload 初始化失败'),
       createSession: reject('preload 初始化失败'),
       deleteSession: reject('preload 初始化失败'),
@@ -135,7 +179,17 @@ try {
       reloadSkills: reject('preload 初始化失败'),
       searchSkillHub: reject('preload 初始化失败'),
       installSkillFromSkillHub: reject('preload 初始化失败'),
+      deleteSkill: reject('preload 初始化失败'),
       onSkillsChanged: reject('preload 初始化失败'),
+      getTeams: reject('preload 初始化失败'),
+      getTeam: reject('preload 初始化失败'),
+      saveTeam: reject('preload 初始化失败'),
+      deleteTeam: reject('preload 初始化失败'),
+      reloadTeams: reject('preload 初始化失败'),
+      onTeamsChanged: reject('preload 初始化失败'),
+      getSessionTodos: reject('preload 初始化失败'),
+      toggleSessionTodo: reject('preload 初始化失败'),
+      onSessionTodosChanged: reject('preload 初始化失败'),
       onMessageSaved: reject('preload 初始化失败'),
     });
   } catch {

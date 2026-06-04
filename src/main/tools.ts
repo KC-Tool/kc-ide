@@ -6,7 +6,26 @@ import path from 'node:path';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { AgentConfig } from '../shared/ipc.js';
+import type { TodoItem } from '../shared/todo-types.js';
+import { formatTodosForAgent } from '../shared/todo-types.js';
 import { globalToolCache } from './tool-cache.js';
+import { wrapShellOutputWithTemporalAnchor } from './temporal-anchor.js';
+
+export interface ToolRunContext {
+  sessionId?: string;
+}
+
+export interface TodoToolOps {
+  addTodo(sessionId: string, text: string): TodoItem | null;
+  completeTodo(sessionId: string, todoId: string): { ok: boolean; item?: TodoItem; error?: string };
+  listTodos(sessionId: string): TodoItem[];
+}
+
+let todoToolOps: TodoToolOps | null = null;
+
+export function setTodoToolOps(ops: TodoToolOps): void {
+  todoToolOps = ops;
+}
 
 const execAsync = promisify(exec);
 
@@ -135,6 +154,50 @@ export const TOOL_DEFINITIONS = [
         },
         required: ['path', 'anchor', 'action', 'content'],
       },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'todo_add',
+      description: 'Add one or more todo items to the current session task list. Use when breaking work into trackable steps.',
+      parameters: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: 'Single todo description' },
+          items: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Multiple todo descriptions',
+          },
+        },
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'todo_complete',
+      description: 'Mark a session todo as done (checked). Call when a task is finished.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'Todo id from todo_list or todo_add' },
+          ids: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Multiple todo ids to complete',
+          },
+        },
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'todo_list',
+      description: 'List all todos for the current session with done/pending status.',
+      parameters: { type: 'object', properties: {} },
     },
   },
 ];
@@ -266,7 +329,8 @@ async function toolShell(args: { command: string; cwd?: string; timeout?: number
     let result = '';
     if (stdout) result += stdout;
     if (stderr) result += (result ? '\n[stderr]\n' : '') + stderr;
-    return result || '(no output)';
+    const out = result || '(no output)';
+    return wrapShellOutputWithTemporalAnchor(out);
   } catch (err: any) {
     const msg = err.stderr || err.stdout || err.message || String(err);
     return `Error (exit code ${err.code ?? '?'}): ${msg}`;
@@ -462,11 +526,95 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   'insert-code': 'insert_code',
   'insert': 'insert_code',
   'addCode': 'insert_code',
+  'todoAdd': 'todo_add',
+  'todo_add': 'todo_add',
+  'todoComplete': 'todo_complete',
+  'todo_complete': 'todo_complete',
+  'todoList': 'todo_list',
+  'todo_list': 'todo_list',
+  'delegateAgent': 'delegate_agent',
+  'delegate_agent': 'delegate_agent',
+  'delegateAgentsParallel': 'delegate_agents_parallel',
+  'delegate_agents_parallel': 'delegate_agents_parallel',
+  'spawnAgent': 'spawn_agent',
+  'spawn_agent': 'spawn_agent',
 };
 
+const FILE_TOOLS = ['read_file', 'write_file', 'list_dir', 'shell', 'grep', 'glob', 'insert_code'] as const;
+const TODO_TOOLS_LIST = ['todo_add', 'todo_complete', 'todo_list'] as const;
+const DELEGATE_TOOLS = ['delegate_agent', 'delegate_agents_parallel', 'spawn_agent'] as const;
+const ALL_KNOWN_TOOLS = [...FILE_TOOLS, ...TODO_TOOLS_LIST, ...DELEGATE_TOOLS] as const;
+
+type DelegateRunner = (
+  name: string,
+  args: Record<string, unknown>,
+) => Promise<{ output: string; isError: boolean }>;
+
+let delegateRunner: DelegateRunner | null = null;
+
+export function setDelegateRunner(fn: DelegateRunner | null): void {
+  delegateRunner = fn;
+}
+
+function runTodoTool(
+  name: string,
+  args: Record<string, unknown>,
+  ctx?: ToolRunContext,
+): { output: string; isError: boolean } {
+  if (!ctx?.sessionId || !todoToolOps) {
+    return { output: 'Error: Todos require an active chat session.', isError: true };
+  }
+  const sid = ctx.sessionId;
+
+  if (name === 'todo_add') {
+    const texts: string[] = [];
+    if (typeof args.text === 'string' && args.text.trim()) texts.push(args.text.trim());
+    if (Array.isArray(args.items)) {
+      for (const it of args.items) {
+        if (typeof it === 'string' && it.trim()) texts.push(it.trim());
+      }
+    }
+    if (texts.length === 0) {
+      return { output: 'Error: Provide text or items[]', isError: true };
+    }
+    const created: string[] = [];
+    for (const text of texts) {
+      const item = todoToolOps.addTodo(sid, text);
+      if (item) created.push(`${item.id}: ${item.text}`);
+    }
+    return { output: `Added ${created.length} todo(s):\n${created.join('\n')}`, isError: false };
+  }
+
+  if (name === 'todo_complete') {
+    const ids: string[] = [];
+    if (typeof args.id === 'string') ids.push(args.id);
+    if (Array.isArray(args.ids)) {
+      for (const id of args.ids) {
+        if (typeof id === 'string') ids.push(id);
+      }
+    }
+    if (ids.length === 0) {
+      return { output: 'Error: Provide id or ids[]', isError: true };
+    }
+    const lines: string[] = [];
+    for (const id of ids) {
+      const r = todoToolOps.completeTodo(sid, id);
+      lines.push(r.ok ? `✓ ${id}` : `✗ ${id}: ${r.error}`);
+    }
+    return { output: lines.join('\n'), isError: false };
+  }
+
+  if (name === 'todo_list') {
+    const list = todoToolOps.listTodos(sid);
+    return { output: formatTodosForAgent(list), isError: false };
+  }
+
+  return { output: `Error: Unknown todo tool ${name}`, isError: true };
+}
+
 export function normalizeToolName(name: string): string {
-  // 直接匹配
-  if (['read_file', 'write_file', 'list_dir', 'shell', 'grep', 'glob'].includes(name)) {
+  const all = ALL_KNOWN_TOOLS;
+  if (all.includes(name as typeof all[number])) {
     return name;
   }
   // 别名映射
@@ -474,7 +622,7 @@ export function normalizeToolName(name: string): string {
   if (alias) return alias;
   // camelCase → snake_case
   const snake = name.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase();
-  if (['read_file', 'write_file', 'list_dir', 'shell', 'grep', 'glob'].includes(snake)) {
+  if (all.includes(snake as typeof all[number])) {
     return snake;
   }
   // 去重：处理 "list_dirlist_dir" 这种流式解析残留
@@ -485,7 +633,12 @@ export function normalizeToolName(name: string): string {
   return name;
 }
 
-export async function executeTool(name: string, argsJson: string, cwd: string): Promise<{ output: string; isError: boolean; fileSnapshot?: { path: string; originalContent: string; isNew: boolean } }> {
+export async function executeTool(
+  name: string,
+  argsJson: string,
+  cwd: string,
+  ctx?: ToolRunContext,
+): Promise<{ output: string; isError: boolean; fileSnapshot?: { path: string; originalContent: string; isNew: boolean }; todosChanged?: boolean }> {
   let args: any;
   // 使用自动修复的 JSON 解析
   args = tryParseJson(argsJson);
@@ -495,6 +648,18 @@ export async function executeTool(name: string, argsJson: string, cwd: string): 
 
   try {
     const normalizedName = normalizeToolName(name);
+
+    if (TODO_TOOLS_LIST.includes(normalizedName as typeof TODO_TOOLS_LIST[number])) {
+      const todoResult = runTodoTool(normalizedName, args, ctx);
+      return { ...todoResult, todosChanged: !todoResult.isError };
+    }
+
+    if (DELEGATE_TOOLS.includes(normalizedName as typeof DELEGATE_TOOLS[number])) {
+      if (!delegateRunner) {
+        return { output: 'Error: Delegate tools not available', isError: true };
+      }
+      return await delegateRunner(normalizedName, args);
+    }
 
     // 本地工具缓存（read/grep/glob/list_dir）
     const cached = globalToolCache.get(normalizedName, argsJson, cwd);

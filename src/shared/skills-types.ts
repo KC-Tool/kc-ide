@@ -4,7 +4,7 @@ export interface SkillListItem {
   id: string;
   name: string;
   description: string;
-  source: 'builtin' | 'user';
+  source: 'builtin' | 'user' | 'skillhub';
 }
 
 export interface SkillDetail extends SkillListItem {

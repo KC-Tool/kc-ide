@@ -4,10 +4,11 @@ import { LOCALE_LABELS } from '../../shared/i18n';
 import type { Locale } from '../../shared/ipc';
 import { useI18n } from '../contexts/I18nContext';
 import { useTheme } from '../contexts/ThemeContext';
+import TeamsSettingsPanel from './TeamsSettingsPanel';
 
-export type SettingsTab = 'general' | 'model';
+export type SettingsTab = 'general' | 'model' | 'teams';
 
-const TAB_ORDER: SettingsTab[] = ['general', 'model'];
+const TAB_ORDER: SettingsTab[] = ['general', 'model', 'teams'];
 
 interface Props {
   initialTab: SettingsTab;
@@ -36,7 +37,7 @@ export default function SettingsHub({ initialTab, onClose, onModelSaved }: Props
   const tabRef = useRef(initialTab === 'model' ? 1 : 0);
 
   useEffect(() => {
-    if (initialTab === 'general' || initialTab === 'model') {
+    if (TAB_ORDER.includes(initialTab)) {
       setTab(initialTab);
       tabRef.current = TAB_ORDER.indexOf(initialTab);
     }
@@ -67,6 +68,7 @@ export default function SettingsHub({ initialTab, onClose, onModelSaved }: Props
       theme: generalDraft.theme,
       fontSize: generalDraft.fontSize,
       locale: generalDraft.locale,
+      defaultTeamId: generalDraft.defaultTeamId,
     });
     if (generalDraft.locale !== locale) {
       await setLocale(generalDraft.locale);
@@ -90,9 +92,15 @@ export default function SettingsHub({ initialTab, onClose, onModelSaved }: Props
     if (e.target === e.currentTarget) onClose();
   };
 
+  const handleDefaultTeamChange = useCallback((id: string | undefined) => {
+    setGeneralDraft((d) => (d ? { ...d, defaultTeamId: id } : d));
+    void updateSettings({ defaultTeamId: id });
+  }, [updateSettings]);
+
   const tabs: { id: SettingsTab; label: string }[] = [
     { id: 'general', label: t('settings.tab.general') },
     { id: 'model', label: t('settings.tab.model') },
+    { id: 'teams', label: t('settings.tab.teams') },
   ];
 
   return (
@@ -187,6 +195,13 @@ export default function SettingsHub({ initialTab, onClose, onModelSaved }: Props
                   />
                 </div>
               </div>
+            )}
+
+            {tab === 'teams' && generalDraft && (
+              <TeamsSettingsPanel
+                defaultTeamId={generalDraft.defaultTeamId}
+                onDefaultTeamChange={handleDefaultTeamChange}
+              />
             )}
 
             {tab === 'model' && config && (

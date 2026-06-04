@@ -33,6 +33,7 @@ const zh: Messages = {
   'settings.title': '设置',
   'settings.tab.general': '通用',
   'settings.tab.model': '模型',
+  'settings.tab.teams': 'Agent Team',
   'settings.tab.skills': 'Skills 商店',
   'settings.cancel': '取消',
   'settings.save': '保存',
@@ -81,13 +82,14 @@ const zh: Messages = {
   'skills.intro': 'Skills 是专项能力包，在聊天中用 /skills 或 /<id> 激活。',
   'skills.builtin': '内置 Skills',
   'skills.user': '用户 Skills',
-  'skills.userPath': '自定义目录：~/.koder/skills/<id>/SKILL.md',
+  'skills.userPath': '所有技能统一目录：~/.koder/skills/<id>/（内置首次启动会复制到此）',
   'skills.reload': '刷新列表',
   'skills.useHint': '在聊天输入',
   'skills.viewDetail': '查看',
   'skills.noUser': '暂无用户 Skills，可从 SkillHub 安装或按路径手动添加。',
   'skills.source.builtin': '内置',
   'skills.source.user': '用户',
+  'skills.source.skillhub': 'SkillHub',
   'skills.search.placeholder': '搜索 SkillHub 技能…',
   'skills.search.button': '搜索',
   'skills.install': '安装',
@@ -108,7 +110,7 @@ const zh: Messages = {
   'chat.placeholder': '输入需求… 输入 / 查看命令与 Skills（Ctrl/⌘ + Enter 发送）',
   'chat.send': '发送',
   'chat.stop': '停止',
-  'chat.hint': 'Ctrl/⌘ + Enter 发送',
+  'chat.hint': 'Ctrl/⌘ + Enter 发送 · / 与 @ 打开命令菜单',
   'chat.you': '你',
   'chat.assistant': 'Koder',
   'chat.rollback': '回退',
@@ -145,11 +147,69 @@ const zh: Messages = {
   'chat.confirmRollback': '确认回退',
 
   'sidebar.deleteSession': '删除会话',
+  'sidebar.repositories': '工作区',
+  'sidebar.addWorkspace': '添加工作区',
+  'sidebar.workspaceNone': '未绑定工作区',
+  'sidebar.newSessionInRepo': '新建会话',
+  'sidebar.expandRepo': '展开',
+  'sidebar.collapseRepo': '收起',
+
+  'skills.delete': '删除',
+  'skills.deleteConfirm': '确定删除 /{id} ？此操作不可恢复。',
+  'skills.deleteBuiltin': '内置 Skill 不可删除',
+  'teams.title': 'Agent Team（子代理组）',
+  'teams.intro': '多角色协作：主代理按编排切换「子代理」视角。可在聊天用 @team 激活，或用 @create-team 让模型生成定义文件。',
+  'teams.storagePath': '存储：~/.koder/team/<id>.team.md（格式 koder-team v1）',
+  'teams.defaultTeam': '默认 Team',
+  'teams.defaultTeamDesc': '新会话未指定时自动注入',
+  'teams.none': '无',
+  'teams.create': '新建 Team',
+  'teams.edit': '编辑',
+  'teams.delete': '删除',
+  'teams.reload': '刷新',
+  'teams.saveTeam': '保存 Team',
+  'teams.saved': '已保存',
+  'teams.saveFail': '保存失败',
+  'teams.deleted': '已删除',
+  'teams.deleteFail': '删除失败',
+  'teams.invalidId': '请填写有效的 Team ID（小写字母、数字、连字符）',
+  'teams.empty': '暂无 Team，可新建或使用 @create-team',
+  'teams.formatHint': '保存为 Koder 专用 .team.md，勿与 SKILL.md 混用。',
+  'teams.field.id': 'ID',
+  'teams.field.name': '名称',
+  'teams.field.description': '描述',
+  'teams.field.orchestration': '编排说明',
+  'teams.field.role': '角色',
+  'teams.field.prompt': '子代理提示词',
+  'teams.members': '成员',
+  'teams.member': '成员',
+  'teams.addMember': '添加成员',
+  'teams.removeMember': '移除',
+  'teams.membersCount': '名成员',
+  'skills.deleted': '已删除 /{id}',
+
+  'temporal.title': '时间锚点说明',
+  'temporal.lead': '为防止部分模型因错误的“当前日期”认知而表现异常（俗称降智），Koder 已在运行时强制锁定系统时间为：',
+  'temporal.li1': '该日期由程序注入每条对话与工具上下文，不依赖你手动修改系统提示词。',
+  'temporal.li2': '模型应始终以 2026 年 4 月 1 日为“今天”进行推理。',
+  'temporal.li3': '若 shell 输出显示其他日期，请以时间锚点为准。',
+  'temporal.foot': '这是 Koder 的防护机制，有助于在长时间编码任务中保持稳定的时序判断。',
+  'temporal.dontShowAgain': '不再显示此说明',
+  'temporal.understand': '我知道了',
 
   'slash.cmd': 'Cmd',
   'slash.skill': 'Skill',
   'slash.skills.desc': '列出所有可用 Skills',
   'slash.help.desc': 'Slash 命令帮助',
+
+  'at.teams.desc': '列出 Agent Team',
+  'at.help.desc': '@ 命令帮助',
+  'at.createTeam.desc': '让模型创建 Team 文件',
+  'at.team': 'Team',
+
+  'todo.title': '待办',
+  'todo.complete': '标记完成',
+  'todo.uncomplete': '取消完成',
 
   'common.close': '关闭',
 };
@@ -176,6 +236,7 @@ const en: Messages = {
   'settings.title': 'Settings',
   'settings.tab.general': 'General',
   'settings.tab.model': 'Model',
+  'settings.tab.teams': 'Agent Team',
   'settings.tab.skills': 'Skills Store',
   'settings.cancel': 'Cancel',
   'settings.save': 'Save',
@@ -224,13 +285,14 @@ const en: Messages = {
   'skills.intro': 'Skills are instruction packs. Use /skills or /<id> in chat to activate.',
   'skills.builtin': 'Built-in Skills',
   'skills.user': 'User Skills',
-  'skills.userPath': 'Custom: ~/.koder/skills/<id>/SKILL.md',
+  'skills.userPath': 'All skills live in ~/.koder/skills/<id>/ (built-ins copied on first launch)',
   'skills.reload': 'Refresh',
   'skills.useHint': 'In chat, type',
   'skills.viewDetail': 'Details',
   'skills.noUser': 'No user skills yet. Install from SkillHub or add manually.',
   'skills.source.builtin': 'Built-in',
   'skills.source.user': 'User',
+  'skills.source.skillhub': 'SkillHub',
   'skills.search.placeholder': 'Search SkillHub…',
   'skills.search.button': 'Search',
   'skills.install': 'Install',
@@ -251,7 +313,7 @@ const en: Messages = {
   'chat.placeholder': 'Ask anything… type / for commands (Ctrl/⌘ + Enter to send)',
   'chat.send': 'Send',
   'chat.stop': 'Stop',
-  'chat.hint': 'Ctrl/⌘ + Enter to send',
+  'chat.hint': 'Ctrl/⌘ + Enter to send · type / or @ for commands',
   'chat.you': 'You',
   'chat.assistant': 'Koder',
   'chat.rollback': 'Rollback',
@@ -288,11 +350,69 @@ const en: Messages = {
   'chat.confirmRollback': 'Confirm rollback',
 
   'sidebar.deleteSession': 'Delete session',
+  'sidebar.repositories': 'Repositories',
+  'sidebar.addWorkspace': 'Add workspace',
+  'sidebar.workspaceNone': 'Unassigned',
+  'sidebar.newSessionInRepo': 'New chat',
+  'sidebar.expandRepo': 'Expand',
+  'sidebar.collapseRepo': 'Collapse',
+
+  'skills.delete': 'Delete',
+  'skills.deleteConfirm': 'Delete /{id}? This cannot be undone.',
+  'skills.deleteBuiltin': 'Built-in skills cannot be deleted',
+  'teams.title': 'Agent Teams',
+  'teams.intro': 'Multi-role collaboration: the lead agent switches sub-agent hats per orchestration. Use @team in chat or @create-team to generate a file.',
+  'teams.storagePath': 'Storage: ~/.koder/team/<id>.team.md (koder-team v1)',
+  'teams.defaultTeam': 'Default team',
+  'teams.defaultTeamDesc': 'Injected for new sessions when none is selected',
+  'teams.none': 'None',
+  'teams.create': 'New team',
+  'teams.edit': 'Edit',
+  'teams.delete': 'Delete',
+  'teams.reload': 'Reload',
+  'teams.saveTeam': 'Save team',
+  'teams.saved': 'Saved',
+  'teams.saveFail': 'Save failed',
+  'teams.deleted': 'Deleted',
+  'teams.deleteFail': 'Delete failed',
+  'teams.invalidId': 'Enter a valid team ID (lowercase letters, digits, hyphens)',
+  'teams.empty': 'No teams yet. Create one or use @create-team',
+  'teams.formatHint': 'Saved as Koder .team.md — not SKILL.md.',
+  'teams.field.id': 'ID',
+  'teams.field.name': 'Name',
+  'teams.field.description': 'Description',
+  'teams.field.orchestration': 'Orchestration',
+  'teams.field.role': 'Role',
+  'teams.field.prompt': 'Sub-agent prompt',
+  'teams.members': 'Members',
+  'teams.member': 'Member',
+  'teams.addMember': 'Add member',
+  'teams.removeMember': 'Remove',
+  'teams.membersCount': 'members',
+  'skills.deleted': 'Deleted /{id}',
+
+  'temporal.title': 'Temporal anchor',
+  'temporal.lead': 'To reduce degraded reasoning from wrong “current date” assumptions, Koder locks runtime time to:',
+  'temporal.li1': 'This date is injected into every turn and tool context automatically—not via your editable system prompt.',
+  'temporal.li2': 'The model must treat April 1, 2026 as authoritative “today”.',
+  'temporal.li3': 'If shell output shows another date, prefer the anchor.',
+  'temporal.foot': 'This is a protective mechanism for long coding sessions.',
+  'temporal.dontShowAgain': "Don't show again",
+  'temporal.understand': 'Got it',
 
   'slash.cmd': 'Cmd',
   'slash.skill': 'Skill',
   'slash.skills.desc': 'List all skills',
   'slash.help.desc': 'Slash command help',
+
+  'at.teams.desc': 'List agent teams',
+  'at.help.desc': '@ command help',
+  'at.createTeam.desc': 'Model creates a team file',
+  'at.team': 'Team',
+
+  'todo.title': 'Todos',
+  'todo.complete': 'Mark done',
+  'todo.uncomplete': 'Mark pending',
 
   'common.close': 'Close',
 };
@@ -355,6 +475,7 @@ export function formatSkillsListLocalized(locale: Locale, skills: Array<{ id: st
 }
 
 export function formatHelpLocalized(locale: Locale): string {
+  const at = formatAtHelpLocalized(locale);
   if (locale === 'en') {
     return `## Slash commands
 
@@ -363,7 +484,9 @@ export function formatHelpLocalized(locale: Locale): string {
 | \`/skills\` | List skills |
 | \`/help\` | This help |
 | \`/<skill-id> <msg>\` | Run with skill |
-| \`/skill <id> <msg>\` | Same |`;
+| \`/skill <id> <msg>\` | Same |
+
+${at}`;
   }
   return `## Slash 命令
 
@@ -372,5 +495,45 @@ export function formatHelpLocalized(locale: Locale): string {
 | \`/skills\` | 列出 Skills |
 | \`/help\` | 本帮助 |
 | \`/<skill-id> 消息\` | 使用 Skill |
-| \`/skill <id> 消息\` | 同上 |`;
+| \`/skill <id> 消息\` | 同上 |
+
+${at}`;
+}
+
+export function formatTeamsListLocalized(locale: Locale, teams: import('./team-types.js').TeamListItem[]): string {
+  if (teams.length === 0) {
+    return locale === 'en'
+      ? 'No Agent Teams. Create one under **Settings → Agent Team**, or use `@create-team`.'
+      : '暂无 Agent Team。在 **设置 → Agent Team** 中创建，或使用 `@create-team`。';
+  }
+  const rows = teams.map(
+    t => `- **${t.id}** — ${t.name} (${t.memberCount}, ${t.source})${t.description ? `: ${t.description}` : ''}`,
+  );
+  const footer = locale === 'en'
+    ? '\n\nActivate: `@team <id>` or `@<id>`'
+    : '\n\n激活：\`@team <id>\` 或 \`@<id>\`';
+  return (locale === 'en' ? '## Agent Teams\n\n' : '## Agent Teams\n\n') + rows.join('\n') + footer;
+}
+
+export function formatAtHelpLocalized(locale: Locale): string {
+  if (locale === 'en') {
+    return `## @ commands (Agent Team)
+
+| Command | Description |
+| --- | --- |
+| \`@teams\` | List teams |
+| \`@team <id>\` | Activate team for session |
+| \`@<id>\` | Same shorthand |
+| \`@create-team <desc>\` | Model writes ~/.koder/team/<id>.team.md |
+| \`@help\` | This help |`;
+  }
+  return `## @ 命令（Agent Team）
+
+| 命令 | 说明 |
+| --- | --- |
+| \`@teams\` | 列出 Team |
+| \`@team <id>\` | 为当前会话激活 |
+| \`@<id>\` | 简写 |
+| \`@create-team <描述>\` | 模型写入 ~/.koder/team/<id>.team.md |
+| \`@help\` | 本帮助 |`;
 }

@@ -2,15 +2,17 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
-import AdmZip from 'adm-zip';
 import type { SkillHubInstallResult } from '../shared/skillhub-types.js';
 import { downloadSkillZip } from './skillhub-client.js';
 import { globalSkillsManager } from './skills-manager.js';
-
-function getUserSkillsDir(): string {
-  return path.join(os.homedir(), '.koder', 'skills');
-}
+import {
+  ensureKoderSkillsDir,
+  extractZipToDir,
+  safeUnlink,
+  skillInstallDir,
+  skillZipPath,
+  writeSourceMarker,
+} from './skills-paths.js';
 
 export async function installSkillFromSkillHub(slug: string): Promise<SkillHubInstallResult> {
   const skillId = slug.toLowerCase().replace(/[^a-z0-9-]/g, '-');
@@ -18,26 +20,29 @@ export async function installSkillFromSkillHub(slug: string): Promise<SkillHubIn
     return { ok: false, skillId: slug, error: 'Invalid skill slug' };
   }
 
-  const targetDir = path.join(getUserSkillsDir(), skillId);
+  ensureKoderSkillsDir();
+  const targetDir = skillInstallDir(skillId);
+  const zipFile = skillZipPath(skillId);
 
   try {
     const zipBuffer = await downloadSkillZip(skillId);
-    const zip = new AdmZip(zipBuffer);
+    fs.writeFileSync(zipFile, zipBuffer);
 
-    if (fs.existsSync(targetDir)) {
-      fs.rmSync(targetDir, { recursive: true, force: true });
-    }
-    fs.mkdirSync(targetDir, { recursive: true });
-    zip.extractAllTo(targetDir, true);
+    extractZipToDir(zipFile, targetDir);
+    safeUnlink(zipFile);
 
     if (!fs.existsSync(path.join(targetDir, 'SKILL.md'))) {
-      fs.rmSync(targetDir, { recursive: true, force: true });
+      if (fs.existsSync(targetDir)) {
+        fs.rmSync(targetDir, { recursive: true, force: true });
+      }
       return { ok: false, skillId, error: 'Package does not contain SKILL.md' };
     }
 
+    writeSourceMarker(targetDir, 'skillhub');
     globalSkillsManager.reload();
     return { ok: true, skillId };
   } catch (err) {
+    safeUnlink(zipFile);
     if (fs.existsSync(targetDir)) {
       try { fs.rmSync(targetDir, { recursive: true, force: true }); } catch { /* ignore */ }
     }

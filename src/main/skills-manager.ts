@@ -1,10 +1,17 @@
-// Skills 管理器 — 加载内置与用户 Skills，注入 Agent 上下文
+// Skills 管理器 — 统一从 ~/.koder/skills/ 加载；启动时将内置技能复制到该目录
 
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import { app } from 'electron';
 import type { SkillDetail, SkillListItem } from '../shared/skills-types.js';
+import {
+  copyDirRecursive,
+  ensureKoderSkillsDir,
+  getKoderSkillsDir,
+  readSourceMarker,
+  skillInstallDir,
+  writeSourceMarker,
+} from './skills-paths.js';
 
 interface ParsedSkillFile {
   id: string;
@@ -17,7 +24,7 @@ export class SkillsManager {
   private cache: SkillListItem[] | null = null;
   private contentCache = new Map<string, SkillDetail>();
 
-  /** 内置 skills 目录（打包时随应用分发） */
+  /** 应用包内内置 skills（仅用于首次同步复制） */
   getBuiltinDir(): string {
     if (app.isPackaged) {
       const fromResources = path.join(process.resourcesPath, 'skills', 'builtin');
@@ -26,17 +33,43 @@ export class SkillsManager {
     return path.join(app.getAppPath(), 'skills', 'builtin');
   }
 
-  /** 用户自定义 skills */
+  /** 所有技能统一存放目录 */
   getUserDir(): string {
-    return path.join(os.homedir(), '.koder', 'skills');
+    return getKoderSkillsDir();
   }
 
   init(): void {
-    const userDir = this.getUserDir();
-    if (!fs.existsSync(userDir)) {
-      fs.mkdirSync(userDir, { recursive: true });
-    }
+    ensureKoderSkillsDir();
+    this.syncBuiltinToUserDir();
     this.reload();
+  }
+
+  /** 将内置 skills 复制到 ~/.koder/skills/（已存在且含 SKILL.md 则跳过，避免覆盖用户修改） */
+  syncBuiltinToUserDir(): void {
+    const builtinDir = this.getBuiltinDir();
+    const userDir = this.getUserDir();
+    if (!fs.existsSync(builtinDir)) return;
+
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(builtinDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const id = entry.name;
+      const srcSkillMd = path.join(builtinDir, id, 'SKILL.md');
+      if (!fs.existsSync(srcSkillMd)) continue;
+
+      const destDir = skillInstallDir(id);
+      const destSkillMd = path.join(destDir, 'SKILL.md');
+      if (fs.existsSync(destSkillMd)) continue;
+
+      copyDirRecursive(path.join(builtinDir, id), destDir);
+      writeSourceMarker(destDir, 'builtin');
+    }
   }
 
   reload(): void {
@@ -47,22 +80,10 @@ export class SkillsManager {
   list(): SkillListItem[] {
     if (this.cache) return this.cache;
 
-    const items: SkillListItem[] = [];
-    const builtinDir = this.getBuiltinDir();
     const userDir = this.getUserDir();
+    const items = fs.existsSync(userDir) ? this.scanDir(userDir) : [];
 
-    if (fs.existsSync(builtinDir)) {
-      items.push(...this.scanDir(builtinDir, 'builtin'));
-    }
-    if (fs.existsSync(userDir)) {
-      items.push(...this.scanDir(userDir, 'user'));
-    }
-
-    items.sort((a, b) => {
-      if (a.source !== b.source) return a.source === 'builtin' ? -1 : 1;
-      return a.id.localeCompare(b.id);
-    });
-
+    items.sort((a, b) => a.id.localeCompare(b.id));
     this.cache = items;
     return items;
   }
@@ -76,32 +97,32 @@ export class SkillsManager {
       return this.contentCache.get(id)!;
     }
 
-    for (const source of ['builtin', 'user'] as const) {
-      const base = source === 'builtin' ? this.getBuiltinDir() : this.getUserDir();
-      const skillPath = path.join(base, id, 'SKILL.md');
-      if (!fs.existsSync(skillPath)) continue;
+    const skillPath = path.join(this.getUserDir(), id, 'SKILL.md');
+    if (!fs.existsSync(skillPath)) return null;
 
-      try {
-        const raw = fs.readFileSync(skillPath, 'utf8');
-        const parsed = parseSkillMarkdown(raw, id);
-        const detail: SkillDetail = {
-          id: parsed.id,
-          name: parsed.name,
-          description: parsed.description,
-          content: parsed.content,
-          source,
-          path: skillPath,
-        };
-        this.contentCache.set(id, detail);
-        return detail;
-      } catch {
-        continue;
-      }
+    try {
+      const raw = fs.readFileSync(skillPath, 'utf8');
+      const parsed = parseSkillMarkdown(raw, id);
+      const marker = readSourceMarker(path.join(this.getUserDir(), id));
+      const source: SkillListItem['source'] =
+        marker === 'builtin' ? 'builtin'
+        : marker === 'skillhub' ? 'skillhub'
+        : 'user';
+      const detail: SkillDetail = {
+        id: parsed.id,
+        name: parsed.name,
+        description: parsed.description,
+        content: parsed.content,
+        source,
+        path: skillPath,
+      };
+      this.contentCache.set(id, detail);
+      return detail;
+    } catch {
+      return null;
     }
-    return null;
   }
 
-  /** 注入到用户消息前的 Skill 上下文 */
   buildInjection(skillId: string): string | null {
     const skill = this.get(skillId);
     if (!skill) return null;
@@ -121,7 +142,24 @@ export class SkillsManager {
     ].join('\n');
   }
 
-  /** 追加到 system prompt 的 Skills 目录摘要 */
+  deleteSkill(id: string): { ok: boolean; error?: string } {
+    const skillDir = path.join(this.getUserDir(), id);
+    const marker = readSourceMarker(skillDir);
+    if (marker === 'builtin') {
+      return { ok: false, error: 'builtin_protected' };
+    }
+    if (!fs.existsSync(skillDir)) {
+      return { ok: false, error: 'not_found' };
+    }
+    try {
+      fs.rmSync(skillDir, { recursive: true, force: true });
+      this.reload();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
   buildCatalogForSystemPrompt(): string {
     const skills = this.list();
     if (skills.length === 0) return '';
@@ -136,7 +174,7 @@ export class SkillsManager {
     ].join('\n');
   }
 
-  private scanDir(baseDir: string, source: 'builtin' | 'user'): SkillListItem[] {
+  private scanDir(baseDir: string): SkillListItem[] {
     const result: SkillListItem[] = [];
     let entries: fs.Dirent[];
     try {
@@ -147,12 +185,20 @@ export class SkillsManager {
 
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const skillPath = path.join(baseDir, entry.name, 'SKILL.md');
+      if (entry.name === '.cache') continue;
+
+      const skillDir = path.join(baseDir, entry.name);
+      const skillPath = path.join(skillDir, 'SKILL.md');
       if (!fs.existsSync(skillPath)) continue;
 
       try {
         const raw = fs.readFileSync(skillPath, 'utf8');
         const parsed = parseSkillMarkdown(raw, entry.name);
+        const marker = readSourceMarker(skillDir);
+        const source: SkillListItem['source'] =
+          marker === 'builtin' ? 'builtin'
+          : marker === 'skillhub' ? 'skillhub'
+          : 'user';
         result.push({
           id: parsed.id,
           name: parsed.name,

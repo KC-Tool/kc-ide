@@ -195,7 +195,7 @@ Koder 采用 **双层缓存** 降低延迟与 API 成本：
 | 文件 | 位置 | 内容 |
 | --- | --- | --- |
 | `config.json` | `~/.koder/` | API 配置、系统提示词 |
-| `sessions.json` | Electron userData | 会话、消息、segments、文件快照 |
+| `session/<工作区文件夹>/` | `~/.koder/session/` | 每个会话一个 JSON，如 `d-31702-koder/<uuid>.json` |
 | `settings.json` | Electron userData | 主题、字号、`locale`（`zh` / `en`） |
 
 ### tsx 零编译

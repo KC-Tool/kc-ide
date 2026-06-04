@@ -22,6 +22,12 @@ interface ChatMessage {
   tool_call_id?: string;
 }
 
+export interface AgentRunOptions {
+  tools?: typeof TOOL_DEFINITIONS;
+  skipResetWrittenFiles?: boolean;
+  maxIterations?: number;
+}
+
 interface RunningAgent {
   sessionId: string;
   cancelled: boolean;
@@ -36,13 +42,15 @@ export class AgentEngine {
     conversationHistory: ChatMessage[],
     cwd: string,
     eventCb: (e: AgentEvent) => void,
+    sessionId: string = randomUUID(),
+    options: AgentRunOptions = {},
   ): Promise<void> {
-    const sessionId = conversationHistory.length > 0
-      ? (conversationHistory[conversationHistory.length - 1] as any).__sessionId ?? randomUUID()
-      : randomUUID();
+    const tools = options.tools ?? TOOL_DEFINITIONS;
+    const maxIterations = options.maxIterations ?? 20;
 
-    // 新的一轮 agent run，重置文件写入跟踪
-    resetWrittenFileTracking();
+    if (!options.skipResetWrittenFiles) {
+      resetWrittenFileTracking();
+    }
     configureToolCache(config);
 
     // 累加器：跨迭代累积上下文总消耗
@@ -59,7 +67,7 @@ export class AgentEngine {
       tool_call_id: m.tool_call_id,
     }));
 
-    const MAX_ITERATIONS = 20;
+    const MAX_ITERATIONS = maxIterations;
 
     for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
       if (handle.cancelled) {
@@ -68,7 +76,7 @@ export class AgentEngine {
       }
 
       try {
-        const result = await this.callAPI(config, messages, cwd, handle, eventCb);
+        const result = await this.callAPI(config, messages, cwd, handle, eventCb, tools);
 
         accumulatedCachedTokens += result.cachedTokens;
 
@@ -78,7 +86,7 @@ export class AgentEngine {
         const breakdown = {
           system: systemEstimate,
           history: messages.filter(m => m.role !== 'tool').reduce((s, m) => s + estimateTokens(m.content as string), 0),
-          toolDefs: estimateTokens(JSON.stringify(TOOL_DEFINITIONS)),
+          toolDefs: estimateTokens(JSON.stringify(tools)),
           toolResults: messages.filter(m => m.role === 'tool').reduce((s, m) => s + estimateTokens(m.content), 0),
           currentOutput: estimateTokens(result.textContent)
             + estimateTokens(result.thinkingContent)
@@ -142,7 +150,7 @@ export class AgentEngine {
 
           eventCb({ type: 'tool_call_start', toolCall: tc, ts: Date.now() });
 
-          const { output, isError, fileSnapshot } = await executeTool(tc.name, tc.arguments, cwd);
+          const { output, isError, fileSnapshot, todosChanged } = await executeTool(tc.name, tc.arguments, cwd, { sessionId });
 
           const toolResult: ToolResult = {
             toolCallId: tc.id,
@@ -152,7 +160,7 @@ export class AgentEngine {
             fileSnapshot,
           };
 
-          eventCb({ type: 'tool_result', toolResult, ts: Date.now() });
+          eventCb({ type: 'tool_result', toolResult, ts: Date.now(), todosChanged });
 
           messages.push({
             role: 'tool',
@@ -199,6 +207,7 @@ export class AgentEngine {
     cwd: string,
     handle: RunningAgent,
     eventCb: (e: AgentEvent) => void,
+    tools: typeof TOOL_DEFINITIONS = TOOL_DEFINITIONS,
   ): Promise<{
     textContent: string;
     thinkingContent: string;
@@ -220,7 +229,7 @@ export class AgentEngine {
       }
 
       const apiMessages = buildCacheOptimizedMessages(config, messages, cwd);
-      const bodyObj = buildApiRequestBody(config, apiMessages, cwd);
+      const bodyObj = buildApiRequestBody(config, apiMessages, cwd, tools);
       const body = JSON.stringify(bodyObj);
 
       const isHttps = url.protocol === 'https:';

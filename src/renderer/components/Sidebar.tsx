@@ -1,55 +1,45 @@
-import { useMemo } from 'react';
-import type { AppInfo, SessionListItem } from '../../shared/ipc';
-import { useTheme } from '../contexts/ThemeContext';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { AppInfo, SessionRepoGroup } from '../../shared/ipc';
 import { useI18n } from '../contexts/I18nContext';
 import type { SettingsTab } from './SettingsHub';
 
 interface Props {
   info: AppInfo | null;
-  sessionList: SessionListItem[];
   currentSessionId: string | null;
-  onNewSession: () => void;
+  onNewSession: (cwd?: string) => void;
   onSelectSession: (id: string) => void;
   onDeleteSession: (id: string) => void;
+  onPickWorkspaceFolder: () => void;
   onOpenSettings: (tab?: SettingsTab) => void;
   onOpenSkillsStore: () => void;
   onOpenFileBrowser: () => void;
+  refreshKey?: number;
 }
 
-function groupSessions(list: SessionListItem[], labels: { today: string; yesterday: string; older: string }) {
-  const now = Date.now();
-  const dayMs = 86400000;
-  const today: SessionListItem[] = [];
-  const yesterday: SessionListItem[] = [];
-  const older: SessionListItem[] = [];
-
-  for (const s of list) {
-    const diff = now - s.updatedAt;
-    if (diff < dayMs) {
-      today.push(s);
-    } else if (diff < dayMs * 2) {
-      yesterday.push(s);
-    } else {
-      older.push(s);
-    }
-  }
-
-  const groups: { label: string; items: SessionListItem[] }[] = [];
-  if (today.length > 0) groups.push({ label: labels.today, items: today });
-  if (yesterday.length > 0) groups.push({ label: labels.yesterday, items: yesterday });
-  if (older.length > 0) groups.push({ label: labels.older, items: older });
-  return groups;
-}
-
-const IconPlus = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+const IconFolder = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
   </svg>
 );
 
-const IconFolder = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+const IconFolderPlus = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
     <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+    <line x1="12" y1="11" x2="12" y2="17" /><line x1="9" y1="14" x2="15" y2="14" />
+  </svg>
+);
+
+const IconChevron = ({ open }: { open: boolean }) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={open ? 'repo-chevron open' : 'repo-chevron'}
+  >
+    <polyline points="9 18 15 12 9 6" />
   </svg>
 );
 
@@ -62,91 +52,171 @@ const IconSettings = () => (
 const IconSparkles = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3z" />
-    <path d="M5 17l.75 2.25L8 20l-2.25.75L5 23l-.75-2.25L2 20l2.25-.75L5 17z" />
-    <path d="M19 13l.5 1.5L21 15l-1.5.5L19 17l-.5-1.5L17 15l1.5-.5L19 13z" />
   </svg>
 );
 
-const IconX = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-  </svg>
-);
+function repoKey(group: SessionRepoGroup): string {
+  return group.cwd ?? `__${group.storageFolder}`;
+}
 
 export default function Sidebar({
   info,
-  sessionList,
   currentSessionId,
   onNewSession,
   onSelectSession,
   onDeleteSession,
+  onPickWorkspaceFolder,
   onOpenSettings,
   onOpenSkillsStore,
   onOpenFileBrowser,
+  refreshKey = 0,
 }: Props) {
-  const { theme, toggle } = useTheme();
   const { t } = useI18n();
+  const [repoTree, setRepoTree] = useState<SessionRepoGroup[]>([]);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
-  const groupLabels = useMemo(
-    () => ({
-      today: t('sidebar.group.today'),
-      yesterday: t('sidebar.group.yesterday'),
-      older: t('sidebar.group.older'),
-    }),
-    [t],
-  );
+  const loadTree = useCallback(async () => {
+    const tree = await window.koder.getSessionRepoTree();
+    setRepoTree(tree);
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      for (const g of tree) {
+        next.add(repoKey(g));
+      }
+      if (currentSessionId) {
+        for (const g of tree) {
+          if (g.sessions.some(s => s.id === currentSessionId)) {
+            next.add(repoKey(g));
+          }
+        }
+      }
+      return next;
+    });
+  }, [currentSessionId]);
 
-  const groups = useMemo(
-    () => groupSessions(sessionList, groupLabels),
-    [sessionList, groupLabels],
-  );
+  useEffect(() => {
+    void loadTree();
+  }, [loadTree, refreshKey]);
+
+  const toggleRepo = (key: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const currentRepoKey = useMemo(() => {
+    if (!currentSessionId) return null;
+    for (const g of repoTree) {
+      if (g.sessions.some(s => s.id === currentSessionId)) {
+        return repoKey(g);
+      }
+    }
+    return null;
+  }, [repoTree, currentSessionId]);
 
   return (
     <aside className="sidebar">
-      <div className="sidebar-header">
+      <div className="sidebar-header sidebar-header-compact">
         <div className="brand">
           <div className="logo">K</div>
           <div className="brand-text">
             <div className="brand-name">{t('app.name')}</div>
-            <div className="brand-sub">v{info?.version ?? '…'} · {t('app.subtitle')}</div>
+            <div className="brand-sub">v{info?.version ?? '…'}</div>
           </div>
         </div>
-        <button type="button" className="btn-new-chat" onClick={onNewSession}>
-          <IconPlus />
-          {t('sidebar.newChat')}
-        </button>
       </div>
 
-      <div className="session-list">
-        {groups.length === 0 && (
+      <div className="repo-list-header">
+        <span className="repo-list-title">{t('sidebar.repositories')}</span>
+        <div className="repo-list-actions">
+          <button
+            type="button"
+            className="repo-icon-btn"
+            onClick={onPickWorkspaceFolder}
+            title={t('sidebar.addWorkspace')}
+          >
+            <IconFolderPlus />
+          </button>
+        </div>
+      </div>
+
+      <div className="repo-list">
+        {repoTree.length === 0 && (
           <div className="session-list-empty">{t('sidebar.noSessions')}</div>
         )}
-        {groups.map((group) => (
-          <div key={group.label}>
-            <div className="session-group-label">{group.label}</div>
-            {group.items.map((s) => (
-              <button
-                key={s.id}
-                type="button"
-                className={`session-item ${s.id === currentSessionId ? 'active' : ''}`}
-                onClick={() => onSelectSession(s.id)}
-              >
-                <span className="session-item-title">{s.title}</span>
+        {repoTree.map((group) => {
+          const key = repoKey(group);
+          const isOpen = expanded.has(key);
+          const isActiveRepo = currentRepoKey === key;
+
+          return (
+            <div key={key} className={`repo-group ${isActiveRepo ? 'repo-group-active' : ''}`}>
+              <div className="repo-folder-row">
                 <button
                   type="button"
-                  className="session-item-delete"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDeleteSession(s.id);
-                  }}
-                  title={t('sidebar.deleteSession')}
+                  className="repo-folder-toggle"
+                  onClick={() => toggleRepo(key)}
+                  title={isOpen ? t('sidebar.collapseRepo') : t('sidebar.expandRepo')}
                 >
-                  <IconX />
+                  <IconChevron open={isOpen} />
                 </button>
-              </button>
-            ))}
-          </div>
-        ))}
+                <button
+                  type="button"
+                  className="repo-folder-main"
+                  onClick={() => toggleRepo(key)}
+                  title={group.cwd ?? t('sidebar.workspaceNone')}
+                >
+                  <span className="repo-folder-icon"><IconFolder /></span>
+                  <span className="repo-folder-name">
+                    {group.storageFolder === '_unassigned' ? t('sidebar.workspaceNone') : group.repoLabel}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="repo-icon-btn repo-new-session"
+                  onClick={() => onNewSession(group.cwd)}
+                  title={t('sidebar.newSessionInRepo')}
+                >
+                  +
+                </button>
+              </div>
+
+              {isOpen && (
+                <div className="repo-sessions">
+                  {group.sessions.map((s) => (
+                    <button
+                      key={s.id}
+                      type="button"
+                      className={`repo-session-item ${s.id === currentSessionId ? 'active' : ''}`}
+                      onClick={() => onSelectSession(s.id)}
+                      title={s.title}
+                    >
+                      <span className="repo-session-dot" aria-hidden />
+                      <span className="repo-session-title">{s.title}</span>
+                      <button
+                        type="button"
+                        className="repo-session-delete"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDeleteSession(s.id);
+                        }}
+                        title={t('sidebar.deleteSession')}
+                      >
+                        ×
+                      </button>
+                    </button>
+                  ))}
+                  {group.sessions.length === 0 && (
+                    <div className="repo-sessions-empty">{t('sidebar.newSessionInRepo')}</div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
 
       <div className="sidebar-footer">
@@ -162,18 +232,6 @@ export default function Sidebar({
           <IconSettings />
           {t('sidebar.settings')}
         </button>
-        <div className="sidebar-footer-item" style={{ cursor: 'default' }}>
-          <div className="theme-toggle">
-            <span className="theme-toggle-label">{t('sidebar.theme.light')}</span>
-            <button
-              type="button"
-              className={`theme-toggle-switch ${theme === 'dark' ? 'active' : ''}`}
-              onClick={toggle}
-              aria-label={t('settings.general.theme')}
-            />
-            <span className="theme-toggle-label">{t('sidebar.theme.dark')}</span>
-          </div>
-        </div>
 
         <div className="env-status">
           <div className="env-row">
@@ -181,14 +239,6 @@ export default function Sidebar({
             <span className={info?.agentConfigured ? 'status-ok' : 'status-warn'}>
               {info?.agentConfigured ? info.agentModel : t('sidebar.env.notConfigured')}
             </span>
-          </div>
-          <div className="env-row">
-            <span>{t('sidebar.env.electron')}</span>
-            <span>{info?.electron ?? '—'}</span>
-          </div>
-          <div className="env-row">
-            <span>{t('sidebar.env.node')}</span>
-            <span>{info?.node ?? '—'}</span>
           </div>
         </div>
       </div>

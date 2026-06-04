@@ -36,6 +36,17 @@ SKILLS SYSTEM:
 - When a message includes an active Skill, its full instructions are prepended to the user request — follow that skill strictly for the task.
 - A catalog of available skill IDs and descriptions is appended to this system prompt at runtime.
 
+AGENT TEAMS:
+- Teams are multi-agent: the LEAD runs in this chat; members run as separate API sub-agents with their own prompts from ~/.koder/team/*.team.md.
+- Activate with @team <id>. Lead must use delegate_agent / delegate_agents_parallel / spawn_agent — never impersonate members.
+- @create-team writes a new team file; spawn_agent creates ad-hoc sub-agents with custom prompts.
+- Catalog appended at runtime.
+
+SESSION TODOS:
+- Each chat session has a todo list shown in the UI with checkmarks.
+- Tools: todo_add (text or items[]), todo_complete (id or ids[]), todo_list.
+- When you finish a step, call todo_complete for that id. Break multi-step work into todos early with todo_add.
+
 Current working directory and environment info will be provided in each conversation.`;
 
 const DEFAULTS: AgentConfig = {

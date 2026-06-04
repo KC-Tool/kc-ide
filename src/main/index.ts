@@ -12,9 +12,20 @@ import { SettingsManager } from './settings-manager.js';
 import { ConfigManager } from './config-manager.js';
 import { AgentEngine } from './agent-engine.js';
 import { globalSkillsManager } from './skills-manager.js';
+import { globalTeamManager } from './team-manager.js';
+import { getKoderTeamsDir } from './team-paths.js';
+import { parseAtCommand } from '../shared/team-types.js';
 import { installSkillFromSkillHub } from './skills-installer.js';
 import { searchSkillHub } from './skillhub-client.js';
+import { getTemporalAnchorSystemBlock, wrapUserMessageWithTemporalAnchor } from './temporal-anchor.js';
 import { parseSlashCommand } from '../shared/skills-types.js';
+import { setTodoToolOps, setDelegateRunner } from './tools.js';
+import { formatTodosForAgent } from '../shared/todo-types.js';
+import {
+  getLeadToolDefinitions,
+  runDelegateTool,
+  setDelegateContext,
+} from './team-delegate.js';
 import type { SkillHubSearchParams } from '../shared/skillhub-types.js';
 import type {
   AgentConfig,
@@ -44,7 +55,7 @@ const configManager = new ConfigManager();
 const agentEngine = new AgentEngine();
 
 function buildEffectiveSystemPrompt(base: string): string {
-  return base + globalSkillsManager.buildCatalogForSystemPrompt();
+  return base + getTemporalAnchorSystemBlock() + globalSkillsManager.buildCatalogForSystemPrompt() + globalTeamManager.buildCatalogForSystemPrompt();
 }
 
 function buildAppInfo(): AppInfo {
@@ -157,6 +168,7 @@ ipcMain.handle('agent:run', async (event, req: AgentRunRequest) => {
   const cwd = session?.cwd || req.cwd || app.getPath('home');
 
   const skillIds = globalSkillsManager.listIds();
+  const teamIds = globalTeamManager.listIds();
   let userPrompt = req.prompt;
   let activeSkillId = req.skillId;
 
@@ -177,19 +189,53 @@ ipcMain.handle('agent:run', async (event, req: AgentRunRequest) => {
     }
   }
 
+  const appSettings = settings.get();
+  let activeTeamId = req.teamId || session?.activeTeamId || appSettings.defaultTeamId;
+
+  if (!req.createTeam && !req.teamId) {
+    const atParsed = parseAtCommand(req.prompt, teamIds);
+    if (atParsed.type === 'activate_team') {
+      activeTeamId = atParsed.teamId;
+      userPrompt = atParsed.userMessage || userPrompt;
+    }
+  }
+
+  if (req.createTeam) {
+    userPrompt = globalTeamManager.buildCreateTeamInjection(userPrompt, getKoderTeamsDir());
+  }
+
+  if (activeTeamId && !req.createTeam) {
+    sessions.updateMeta(req.sessionId, { activeTeamId });
+  }
+
+  let effectiveSystemPrompt = buildEffectiveSystemPrompt(agentConfig.systemPrompt);
+  if (activeTeamId && !req.createTeam) {
+    const coordinator = globalTeamManager.buildCoordinatorSystemBlock(activeTeamId);
+    if (coordinator) {
+      effectiveSystemPrompt += coordinator;
+    }
+  }
+
   const effectiveConfig: AgentConfig = {
     ...agentConfig,
-    systemPrompt: buildEffectiveSystemPrompt(agentConfig.systemPrompt),
+    systemPrompt: effectiveSystemPrompt,
   };
+
+  const leadTools = getLeadToolDefinitions(!!activeTeamId && !req.createTeam);
 
   const conversationHistory = (session?.messages ?? []).map((m) => ({
     role: m.role as 'user' | 'assistant' | 'system',
     content: m.text,
   }));
 
+  const sessionTodos = sessions.getTodos(req.sessionId);
+  if (sessionTodos.length > 0) {
+    userPrompt = `[Session todos — use todo_add / todo_complete / todo_list]\n${formatTodosForAgent(sessionTodos)}\n\n${userPrompt}`;
+  }
+
   conversationHistory.push({
     role: 'user' as const,
-    content: userPrompt,
+    content: wrapUserMessageWithTemporalAnchor(userPrompt),
   });
 
   // 收集文件快照（用于回退）
@@ -221,9 +267,14 @@ ipcMain.handle('agent:run', async (event, req: AgentRunRequest) => {
     }
   };
 
-  // 异步运行 agent
-  void agentEngine.run(effectiveConfig, conversationHistory as any, cwd, (agentEvent) => {
-    if (!sender.isDestroyed()) {
+  const forwardEvent = (agentEvent: AgentEvent) => {
+    if (agentEvent.todosChanged) {
+      broadcastSessionTodosChanged(req.sessionId);
+    }
+
+    const isSub = !!agentEvent.subagent;
+
+    if (!isSub) {
       if (agentEvent.type === 'text_delta') {
         appendTextSegment(agentEvent.data ?? '');
       } else if (agentEvent.type === 'thinking_delta') {
@@ -270,8 +321,28 @@ ipcMain.handle('agent:run', async (event, req: AgentRunRequest) => {
           fileSnapshots.push(agentEvent.toolResult.fileSnapshot);
         }
       }
+    } else if (agentEvent.type === 'tool_result' && agentEvent.toolResult?.fileSnapshot) {
+      fileSnapshots.push(agentEvent.toolResult.fileSnapshot);
+    }
+
+    if (!sender.isDestroyed()) {
       sender.send('agent:event', { ...agentEvent, sessionId: req.sessionId });
     }
+  };
+
+  setDelegateContext({
+    teamId: activeTeamId && !req.createTeam ? activeTeamId : null,
+    sessionId: req.sessionId,
+    cwd,
+    config: effectiveConfig,
+    engine: agentEngine,
+    eventCb: forwardEvent,
+  });
+  setDelegateRunner(runDelegateTool);
+
+  // 异步运行 agent
+  void agentEngine.run(effectiveConfig, conversationHistory as any, cwd, forwardEvent, req.sessionId, {
+    tools: leadTools,
   }).then(() => {
     // agent 运行结束后：先保存 assistant 消息，再保存快照
     if (!sender.isDestroyed()) {
@@ -290,11 +361,19 @@ ipcMain.handle('agent:run', async (event, req: AgentRunRequest) => {
         sessions.saveSnapshots(req.sessionId, assistantMsg.id, fileSnapshots);
       }
 
+      if (req.createTeam) {
+        globalTeamManager.reload();
+        broadcastTeamsChanged();
+      }
+
       // 通知渲染进程刷新
       if (!sender.isDestroyed()) {
         sender.send('agent:message_saved', { sessionId: req.sessionId });
       }
     }
+  }).finally(() => {
+    setDelegateContext(null);
+    setDelegateRunner(null);
   });
 
   return { sessionId: req.sessionId };
@@ -310,12 +389,16 @@ ipcMain.handle('session:list', (): SessionListItem[] => {
   return sessions.list();
 });
 
+ipcMain.handle('session:repoTree', () => {
+  return sessions.listRepoTree();
+});
+
 ipcMain.handle('session:get', (_event, id: string): Session | null => {
   return sessions.get(id);
 });
 
-ipcMain.handle('session:create', (): Session => {
-  return sessions.create();
+ipcMain.handle('session:create', (_event, cwd?: string): Session => {
+  return sessions.create(cwd);
 });
 
 ipcMain.handle('session:delete', (_event, id: string): void => {
@@ -326,12 +409,36 @@ ipcMain.handle('session:addMessage', (_event, sessionId: string, msg: ChatMessag
   sessions.addMessage(sessionId, msg);
 });
 
-ipcMain.handle('session:update', (_event, sessionId: string, patch: Partial<Pick<Session, 'title' | 'cwd' | 'model'>>): void => {
+ipcMain.handle('session:update', (_event, sessionId: string, patch: Partial<Pick<Session, 'title' | 'cwd' | 'model' | 'activeTeamId'>>): void => {
   sessions.updateMeta(sessionId, patch);
 });
 
 ipcMain.handle('session:rollback', (_event, sessionId: string, fromMessageIndex: number) => {
   return sessions.rollback(sessionId, fromMessageIndex);
+});
+
+function broadcastSessionTodosChanged(sessionId: string): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send('session:todos_changed', { sessionId });
+  }
+}
+
+ipcMain.handle('session:getTodos', (_event, sessionId: string) => {
+  return sessions.getTodos(sessionId);
+});
+
+ipcMain.handle('session:toggleTodo', (_event, sessionId: string, todoId: string, done?: boolean) => {
+  const session = sessions.get(sessionId);
+  if (!session) return [];
+  const item = session.todos?.find(t => t.id === todoId);
+  if (!item) return sessions.getTodos(sessionId);
+  if (done === undefined) {
+    sessions.setTodoDone(sessionId, todoId, !item.done);
+  } else {
+    sessions.setTodoDone(sessionId, todoId, done);
+  }
+  broadcastSessionTodosChanged(sessionId);
+  return sessions.getTodos(sessionId);
 });
 
 // ---- IPC: 设置管理 ----
@@ -410,13 +517,54 @@ ipcMain.handle('skillhub:install', async (_event, slug: string) => {
   return result;
 });
 
+ipcMain.handle('skills:delete', (_event, id: string) => {
+  return globalSkillsManager.deleteSkill(id);
+});
+
+// ---- IPC: Agent Teams ----
+
+function broadcastTeamsChanged(): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send('teams:changed');
+  }
+}
+
+ipcMain.handle('teams:list', () => globalTeamManager.list());
+
+ipcMain.handle('teams:get', (_event, id: string) => globalTeamManager.get(id));
+
+ipcMain.handle('teams:save', (_event, team) => {
+  const result = globalTeamManager.save(team);
+  if (result.ok) broadcastTeamsChanged();
+  return result;
+});
+
+ipcMain.handle('teams:delete', (_event, id: string) => {
+  const result = globalTeamManager.delete(id);
+  if (result.ok) broadcastTeamsChanged();
+  return result;
+});
+
+ipcMain.handle('teams:reload', () => {
+  globalTeamManager.reload();
+  const list = globalTeamManager.list();
+  broadcastTeamsChanged();
+  return list;
+});
+
 // ---- App lifecycle ----
 
 app.whenReady().then(async () => {
   resolvePaths();
   sessions.init();
   settings.init();
+  setTodoToolOps({
+    addTodo: (sid, text) => sessions.addTodo(sid, text),
+    completeTodo: (sid, id) => sessions.completeTodo(sid, id),
+    listTodos: (sid) => sessions.getTodos(sid),
+  });
   globalSkillsManager.init();
+  globalTeamManager.init();
   await createMainWindow();
 
   app.on('activate', async () => {

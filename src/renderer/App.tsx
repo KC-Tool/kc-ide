@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { AppInfo, Session, SessionListItem, ChatMessage } from '../shared/ipc';
+import type { AppInfo, Session, ChatMessage } from '../shared/ipc';
 import { ThemeProvider } from './contexts/ThemeContext';
 import Chat from './components/Chat';
 import Sidebar from './components/Sidebar';
 import SettingsHub, { type SettingsTab } from './components/SettingsHub';
 import SkillsStore from './components/SkillsStore';
+import TemporalNoticeModal from './components/TemporalNoticeModal';
 import { I18nProvider } from './contexts/I18nContext';
+import { useI18n } from './contexts/I18nContext';
 import FileBrowser from './components/FileBrowser';
 
-export default function App() {
+function AppInner() {
+  const { settings, refreshSettings } = useI18n();
   const [info, setInfo] = useState<AppInfo | null>(null);
-  const [sessionList, setSessionList] = useState<SessionListItem[]>([]);
+  const [sessionRefreshKey, setSessionRefreshKey] = useState(0);
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
   const [settingsHub, setSettingsHub] = useState<{ open: boolean; tab: SettingsTab }>({
     open: false,
@@ -19,35 +22,39 @@ export default function App() {
   const [showSkillsStore, setShowSkillsStore] = useState(false);
   const [showFileBrowser, setShowFileBrowser] = useState(false);
   const [cwdForBrowser, setCwdForBrowser] = useState('');
+  const [showTemporalNotice, setShowTemporalNotice] = useState(false);
 
   const refreshAppInfo = useCallback(() => {
     void window.koder.getAppInfo().then(setInfo);
+  }, []);
+
+  const bumpSessions = useCallback(() => {
+    setSessionRefreshKey(k => k + 1);
   }, []);
 
   useEffect(() => {
     refreshAppInfo();
   }, [refreshAppInfo]);
 
-  const refreshSessionList = useCallback(async () => {
-    const list = await window.koder.getSessions();
-    setSessionList(list);
-  }, []);
+  useEffect(() => {
+    if (settings && !settings.dismissedTemporalNotice) {
+      setShowTemporalNotice(true);
+    }
+  }, [settings?.dismissedTemporalNotice]);
 
-  // 监听主进程消息保存完成事件，自动刷新会话列表
   useEffect(() => {
     const unsub = window.koder.onMessageSaved(async () => {
-      await refreshSessionList();
+      bumpSessions();
       if (currentSession) {
         const updated = await window.koder.getSession(currentSession.id);
         if (updated) setCurrentSession(updated);
       }
     });
     return unsub;
-  }, [refreshSessionList, currentSession]);
+  }, [bumpSessions, currentSession]);
 
   useEffect(() => {
     (async () => {
-      await refreshSessionList();
       const list = await window.koder.getSessions();
       if (list.length > 0) {
         const latest = await window.koder.getSession(list[0].id);
@@ -55,16 +62,16 @@ export default function App() {
       } else {
         const session = await window.koder.createSession();
         setCurrentSession(session);
-        await refreshSessionList();
       }
+      bumpSessions();
     })();
-  }, [refreshSessionList]);
+  }, [bumpSessions]);
 
-  const handleNewSession = useCallback(async () => {
-    const session = await window.koder.createSession();
+  const handleNewSession = useCallback(async (cwd?: string) => {
+    const session = await window.koder.createSession(cwd);
     setCurrentSession(session);
-    await refreshSessionList();
-  }, [refreshSessionList]);
+    bumpSessions();
+  }, [bumpSessions]);
 
   const handleSelectSession = useCallback(async (id: string) => {
     const session = await window.koder.getSession(id);
@@ -75,24 +82,32 @@ export default function App() {
     await window.koder.deleteSession(id);
     if (currentSession?.id === id) {
       const list = await window.koder.getSessions();
-      const remaining = list.find((s) => s.id !== id);
-      if (remaining) {
-        const session = await window.koder.getSession(remaining.id);
+      if (list.length > 0) {
+        const session = await window.koder.getSession(list[0].id);
         setCurrentSession(session);
       } else {
-        await handleNewSession();
+        const session = await window.koder.createSession();
+        setCurrentSession(session);
       }
     }
-    await refreshSessionList();
-  }, [currentSession?.id, handleNewSession, refreshSessionList]);
+    bumpSessions();
+  }, [currentSession?.id, bumpSessions]);
+
+  const handlePickWorkspaceFolder = useCallback(async () => {
+    const dir = await window.koder.selectDirectory();
+    if (!dir) return;
+    const session = await window.koder.createSession(dir);
+    setCurrentSession(session);
+    bumpSessions();
+  }, [bumpSessions]);
 
   const handleAddMessage = useCallback(async (msg: ChatMessage) => {
     if (!currentSession) return;
     await window.koder.addMessage(currentSession.id, msg);
-    await refreshSessionList();
+    bumpSessions();
     const updated = await window.koder.getSession(currentSession.id);
     if (updated) setCurrentSession(updated);
-  }, [currentSession, refreshSessionList]);
+  }, [currentSession, bumpSessions]);
 
   const handleOpenFileBrowser = useCallback((cwd: string) => {
     setCwdForBrowser(cwd);
@@ -102,33 +117,44 @@ export default function App() {
   const handleWorkspaceChange = useCallback(async () => {
     if (currentSession) {
       const updated = await window.koder.getSession(currentSession.id);
-      if (updated) setCurrentSession(updated);
+      if (updated) {
+        setCurrentSession(updated);
+        bumpSessions();
+      }
     }
-  }, [currentSession]);
+  }, [currentSession, bumpSessions]);
 
   const handleRollback = useCallback(async () => {
     if (currentSession) {
       const updated = await window.koder.getSession(currentSession.id);
       if (updated) setCurrentSession(updated);
-      await refreshSessionList();
+      bumpSessions();
     }
-  }, [currentSession, refreshSessionList]);
+  }, [currentSession, bumpSessions]);
 
   const openSettings = useCallback((tab: SettingsTab = 'general') => {
     setSettingsHub({ open: true, tab });
   }, []);
 
+  const handleDismissTemporalNotice = useCallback(async (dontShowAgain: boolean) => {
+    setShowTemporalNotice(false);
+    if (dontShowAgain) {
+      await window.koder.updateSettings({ dismissedTemporalNotice: true });
+      await refreshSettings();
+    }
+  }, [refreshSettings]);
+
   return (
-    <I18nProvider>
     <ThemeProvider>
       <div className="app-shell">
         <Sidebar
           info={info}
-          sessionList={sessionList}
           currentSessionId={currentSession?.id ?? null}
-          onNewSession={handleNewSession}
-          onSelectSession={handleSelectSession}
-          onDeleteSession={handleDeleteSession}
+          refreshKey={sessionRefreshKey}
+          onNewSession={(cwd) => void handleNewSession(cwd)}
+          onSelectSession={(id) => void handleSelectSession(id)}
+          onDeleteSession={(id) => void handleDeleteSession(id)}
+          onPickWorkspaceFolder={() => void handlePickWorkspaceFolder()}
           onOpenSettings={openSettings}
           onOpenSkillsStore={() => setShowSkillsStore(true)}
           onOpenFileBrowser={() => handleOpenFileBrowser(currentSession?.cwd ?? '')}
@@ -143,6 +169,10 @@ export default function App() {
           />
         </main>
       </div>
+
+      {showTemporalNotice && (
+        <TemporalNoticeModal onDismiss={(d) => void handleDismissTemporalNotice(d)} />
+      )}
 
       {settingsHub.open && (
         <SettingsHub
@@ -166,6 +196,7 @@ export default function App() {
                 window.koder.getSession(currentSession.id).then((s) => {
                   if (s) setCurrentSession(s);
                 });
+                bumpSessions();
               });
             }
             setShowFileBrowser(false);
@@ -173,6 +204,13 @@ export default function App() {
         />
       )}
     </ThemeProvider>
+  );
+}
+
+export default function App() {
+  return (
+    <I18nProvider>
+      <AppInner />
     </I18nProvider>
   );
 }

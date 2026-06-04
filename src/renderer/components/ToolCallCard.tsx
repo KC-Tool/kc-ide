@@ -27,6 +27,12 @@ const TOOL_LABELS: Record<string, string> = {
   grep: '搜索内容',
   glob: '查找文件',
   insert_code: '插入代码',
+  delegate_agent: '委派子 Agent',
+  delegate_agents_parallel: '并行委派',
+  spawn_agent: '临时子 Agent',
+  todo_add: '添加待办',
+  todo_complete: '完成待办',
+  todo_list: '列出待办',
 };
 
 function parseFileContent(toolCall: ToolCallData) {

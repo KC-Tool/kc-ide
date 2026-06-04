@@ -118,9 +118,37 @@ export default function SkillsStore({ onClose }: Props) {
     setSkillDetailBody(skill?.content ?? null);
   }, []);
 
+  const handleDeleteSkill = useCallback(async (skill: SkillListItem) => {
+    if (skill.source === 'builtin') {
+      setToast({ message: t('skills.deleteBuiltin'), type: 'error' });
+      return;
+    }
+    if (!window.confirm(t('skills.deleteConfirm', { id: skill.id }))) return;
+
+    const result = await window.koder.deleteSkill(skill.id);
+    if (result.ok) {
+      if (skillDetailId === skill.id) {
+        setSkillDetailId(null);
+        setSkillDetailBody(null);
+      }
+      setToast({ message: t('skills.deleted', { id: skill.id }), type: 'success' });
+      await loadLocal();
+    } else if (result.error === 'builtin_protected') {
+      setToast({ message: t('skills.deleteBuiltin'), type: 'error' });
+    } else {
+      setToast({ message: result.error ?? t('skills.installFail'), type: 'error' });
+    }
+  }, [loadLocal, skillDetailId, t]);
+
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const builtinSkills = localSkills.filter(s => s.source === 'builtin');
-  const userSkills = localSkills.filter(s => s.source === 'user');
+  const installedSkills = localSkills.filter(s => s.source !== 'builtin');
+
+  const sourceLabel = (source: SkillListItem['source']) => {
+    if (source === 'builtin') return t('skills.source.builtin');
+    if (source === 'skillhub') return t('skills.source.skillhub');
+    return t('skills.source.user');
+  };
 
   const handleOverlayClick = (e: React.MouseEvent) => {
     if (e.target === e.currentTarget) onClose();
@@ -254,23 +282,29 @@ export default function SkillsStore({ onClose }: Props) {
                 viewLabel={t('skills.viewDetail')}
                 active={skillDetailId === s.id}
                 onView={() => void openLocalDetail(s.id)}
+                canDelete={false}
+                onDelete={() => {}}
+                deleteLabel={t('skills.delete')}
               />
             ))}
           </div>
 
           <div className="settings-section-title">{t('skills.user')}</div>
-          {userSkills.length === 0 ? (
+          {installedSkills.length === 0 ? (
             <p className="skills-store-empty">{t('skills.noUser')}</p>
           ) : (
             <div className="skills-store-grid skills-store-grid-compact">
-              {userSkills.map(s => (
+              {installedSkills.map(s => (
                 <LocalSkillCard
                   key={s.id}
                   skill={s}
-                  sourceLabel={t('skills.source.user')}
+                  sourceLabel={sourceLabel(s.source)}
                   viewLabel={t('skills.viewDetail')}
                   active={skillDetailId === s.id}
                   onView={() => void openLocalDetail(s.id)}
+                  canDelete
+                  onDelete={() => void handleDeleteSkill(s)}
+                  deleteLabel={t('skills.delete')}
                 />
               ))}
             </div>
@@ -312,14 +346,20 @@ function LocalSkillCard({
   skill,
   sourceLabel,
   viewLabel,
+  deleteLabel,
   active,
   onView,
+  canDelete,
+  onDelete,
 }: {
   skill: SkillListItem;
   sourceLabel: string;
   viewLabel: string;
+  deleteLabel: string;
   active: boolean;
   onView: () => void;
+  canDelete: boolean;
+  onDelete: () => void;
 }) {
   const { t } = useI18n();
   return (
@@ -332,7 +372,14 @@ function LocalSkillCard({
       <div className="skills-store-card-desc">{skill.description}</div>
       <div className="skills-store-card-actions">
         <span className="skills-store-hint">{t('skills.useHint')} <code>/{skill.id}</code></span>
-        <button type="button" className="btn btn-ghost" onClick={onView}>{viewLabel}</button>
+        <div className="skills-store-card-btns">
+          <button type="button" className="btn btn-ghost" onClick={onView}>{viewLabel}</button>
+          {canDelete && (
+            <button type="button" className="btn btn-ghost btn-danger-text" onClick={onDelete}>
+              {deleteLabel}
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

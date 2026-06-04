@@ -5,7 +5,7 @@ export interface SlashMenuItem {
   label: string;
   description: string;
   insertText: string;
-  kind: 'command' | 'skill';
+  kind: 'command' | 'skill' | 'team';
 }
 
 interface Props {
@@ -13,7 +13,7 @@ interface Props {
   selectedIndex: number;
   onSelect: (item: SlashMenuItem) => void;
   visible: boolean;
-  kindLabels?: { cmd: string; skill: string };
+  kindLabels?: { cmd: string; skill: string; team?: string };
 }
 
 export function buildSlashMenuItems(
@@ -76,7 +76,11 @@ export default function SlashCommandMenu({ items, selectedIndex, onSelect, visib
           }}
         >
           <span className={`slash-menu-kind slash-menu-kind-${item.kind}`}>
-            {item.kind === 'skill' ? (kindLabels?.skill ?? 'Skill') : (kindLabels?.cmd ?? 'Cmd')}
+            {item.kind === 'skill'
+              ? (kindLabels?.skill ?? 'Skill')
+              : item.kind === 'team'
+                ? (kindLabels?.team ?? 'Team')
+                : (kindLabels?.cmd ?? 'Cmd')}
           </span>
           <span className="slash-menu-label">{item.label}</span>
           <span className="slash-menu-desc">{item.description}</span>
