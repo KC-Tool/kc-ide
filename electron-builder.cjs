@@ -29,6 +29,8 @@ module.exports = {
   win: {
     icon: 'build/icon.png',
     target: [{ target: 'nsis', arch: ['x64'] }],
+    signAndEditExecutable: false,
+    forceCodeSigning: false,
   },
   mac: {
     icon: 'build/icon.png',
