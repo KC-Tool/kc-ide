@@ -68,18 +68,26 @@ function convertHistoryMessage(m: ChatMessage): ApiMessage {
 }
 
 /**
- * 在稳定前缀末尾加 cache 断点：倒数第二条非 system 消息
- * Agent 多轮 loop 时，历史 assistant/tool 消息可被 provider 缓存
+ * 在历史消息上设置 cache 断点（最多 4 处），拉长可缓存前缀，提高续聊命中率
  */
 function addRollingCacheBreakpoint(messages: ApiMessage[]): void {
   if (messages.length < 3) return;
 
-  // 从后往前找最后一条 assistant 或 tool 消息，在其上设断点
-  for (let i = messages.length - 1; i >= 0; i--) {
+  const MAX_BREAKPOINTS = 4;
+  let marked = 0;
+  let skippedLatestUser = false;
+
+  for (let i = messages.length - 1; i >= 0 && marked < MAX_BREAKPOINTS; i--) {
     const role = messages[i].role as string;
+    if (role === 'user') {
+      if (!skippedLatestUser) {
+        skippedLatestUser = true;
+      }
+      continue;
+    }
     if (role === 'assistant' || role === 'tool') {
       attachCacheControl(messages[i]);
-      break;
+      marked++;
     }
   }
 }
@@ -102,6 +110,13 @@ function attachCacheControl(msg: ApiMessage): void {
   }
 }
 
+/** 推理/思考类模型通常使用 max_completion_tokens 且不支持 temperature */
+export function usesCompletionTokenLimit(config: AgentConfig): boolean {
+  if (config.reasoningEffort && config.reasoningEffort !== 'off') return true;
+  const m = config.model.toLowerCase();
+  return /\bo[0-9]+[-_]?|gpt-5|reasoner|deepseek-r|thinking/.test(m);
+}
+
 /** 构建 API 请求体（含 prompt 缓存优化字段） */
 export function buildApiRequestBody(
   config: AgentConfig,
@@ -109,15 +124,24 @@ export function buildApiRequestBody(
   cwd: string,
   tools: typeof TOOL_DEFINITIONS = TOOL_DEFINITIONS,
 ): Record<string, unknown> {
+  const tokenLimit = Math.max(256, config.maxTokens || 16384);
+  const reasoning = usesCompletionTokenLimit(config);
+
   const body: Record<string, unknown> = {
     model: config.model,
     messages,
     tools,
     stream: true,
-    max_tokens: config.maxTokens,
-    temperature: config.temperature,
     stream_options: { include_usage: true },
   };
+
+  if (reasoning) {
+    // o-系列 / reasoning 模型：max_tokens 可能导致 0 输出或卡住
+    body.max_completion_tokens = tokenLimit;
+  } else {
+    body.max_tokens = tokenLimit;
+    body.temperature = config.temperature;
+  }
 
   if (config.reasoningEffort && config.reasoningEffort !== 'off') {
     body.reasoning_effort = config.reasoningEffort;

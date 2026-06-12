@@ -31,7 +31,7 @@ export default function TeamsSettingsPanel({ defaultTeamId, onDefaultTeamChange 
       name: '',
       description: '',
       orchestration:
-        'Lead agent coordinates sub-agents by role; state which hat you wear when helpful.',
+        'Lead agent delegates to REAL sub-agents via delegate_agent — never impersonates members.',
       members: [
         { id: 'lead', name: 'Lead', role: '协调', prompt: 'You coordinate and synthesize.' },
       ],

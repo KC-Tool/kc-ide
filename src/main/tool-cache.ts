@@ -66,11 +66,14 @@ export class ToolCache {
     }
   }
 
-  /** 工作区 shell 命令后保守失效（glob/grep/list 可能变化） */
+  /** shell 后仅失效目录/搜索类缓存；read_file 仍靠 mtime 校验，避免续聊重复读盘 */
   invalidateWorkspace(cwd: string): void {
     const prefix = `${path.normalize(cwd)}|`;
+    const SEARCH_TOOLS = new Set(['list_dir', 'glob', 'grep']);
     for (const key of [...this.store.keys()]) {
-      if (key.startsWith(prefix)) {
+      if (!key.startsWith(prefix)) continue;
+      const tool = key.split('|')[1];
+      if (tool && SEARCH_TOOLS.has(tool)) {
         this.store.delete(key);
       }
     }

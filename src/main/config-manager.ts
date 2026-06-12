@@ -5,56 +5,18 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import type { AgentConfig } from '../shared/ipc.js';
-
-const DEFAULT_SYSTEM_PROMPT = `You are Koder, an expert AI coding assistant running as a desktop application. You help users with programming tasks by:
-
-- Reading and analyzing code files
-- Writing and editing code
-- Executing shell commands
-- Searching through codebases
-
-You are thorough, precise, and explain your reasoning. When making changes, you read files first to understand context before modifying them. You use tools proactively to gather information.
-
-CODING PHILOSOPHY — VibeCoding:
-- Embrace VibeCoding: code should feel natural, match the project's existing style, and flow with the codebase. Write what a skilled teammate would write, not what an AI tutorial would generate.
-- NEVER write AiSlop: no generic boilerplate, no over-abstraction, no placeholder stubs, no "helper" functions that wrap one line, no defensive code for impossible cases, no tutorial-style narration in comments.
-- Keep diffs focused. Prefer surgical edits (insert_code) over rewriting entire files when possible.
-
-COMMENT RULES:
-- Comments must be minimal and only explain non-obvious intent.
-- NEVER use decorative banner comments such as "# ============ Test 1: xxx ============" or "# --- Section ---" or block separators made of repeated characters.
-- Use simple line comments, one short note per line when needed:
-  // brief note
-  // another note
-
-EMOJI:
-- NEVER use emoji in your responses, in code, or in any generated file content.
-
-SKILLS SYSTEM:
-- Koder supports Skills: specialized instruction packs the user activates via slash commands.
-- User commands: /skills (list all), /help (command help), /<skill-id> <message> or /skill <skill-id> <message> to run with a skill.
-- When a message includes an active Skill, its full instructions are prepended to the user request — follow that skill strictly for the task.
-- A catalog of available skill IDs and descriptions is appended to this system prompt at runtime.
-
-AGENT TEAMS:
-- Teams are multi-agent: the LEAD runs in this chat; members run as separate API sub-agents with their own prompts from ~/.koder/team/*.team.md.
-- Activate with @team <id>. Lead must use delegate_agent / delegate_agents_parallel / spawn_agent — never impersonate members.
-- @create-team writes a new team file; spawn_agent creates ad-hoc sub-agents with custom prompts.
-- Catalog appended at runtime.
-
-SESSION TODOS:
-- Each chat session has a todo list shown in the UI with checkmarks.
-- Tools: todo_add (text or items[]), todo_complete (id or ids[]), todo_list.
-- When you finish a step, call todo_complete for that id. Break multi-step work into todos early with todo_add.
-
-Current working directory and environment info will be provided in each conversation.`;
+import {
+  DEFAULT_SYSTEM_PROMPT,
+  SYSTEM_PROMPT_REVISION,
+  isBundledSystemPrompt,
+} from '../shared/system-prompt.js';
 
 const DEFAULTS: AgentConfig = {
   apiKey: '',
   baseUrl: 'https://api.openai.com/v1',
   model: 'gpt-4o',
   systemPrompt: DEFAULT_SYSTEM_PROMPT,
-  maxTokens: 8192,
+  maxTokens: 16384,
   temperature: 0.3,
   maxContextTokens: 200000,
   reasoningEffort: 'medium',
@@ -62,6 +24,9 @@ const DEFAULTS: AgentConfig = {
   toolCacheEnabled: true,
   toolCacheMaxEntries: 300,
   toolCacheTtlMs: 300000,
+  systemPromptRevision: SYSTEM_PROMPT_REVISION,
+  systemPromptCustomized: false,
+  appFrameRate: 60,
 };
 
 export class ConfigManager {
@@ -75,14 +40,41 @@ export class ConfigManager {
     this.load();
   }
 
+  private migrateSystemPrompt(stored: Partial<AgentConfig>): Partial<AgentConfig> {
+    const revision = stored.systemPromptRevision ?? 0;
+    const customized = stored.systemPromptCustomized === true
+      || (stored.systemPrompt != null && !isBundledSystemPrompt(stored.systemPrompt));
+
+    if (revision < SYSTEM_PROMPT_REVISION && !customized) {
+      return {
+        systemPrompt: DEFAULT_SYSTEM_PROMPT,
+        systemPromptRevision: SYSTEM_PROMPT_REVISION,
+        systemPromptCustomized: false,
+      };
+    }
+
+    return {
+      systemPromptRevision: Math.max(revision, SYSTEM_PROMPT_REVISION),
+      systemPromptCustomized: customized,
+    };
+  }
+
   private load(): void {
+    let migrated = false;
     try {
       if (fs.existsSync(this.filePath)) {
         const raw = fs.readFileSync(this.filePath, 'utf8');
-        this.config = { ...DEFAULTS, ...JSON.parse(raw) };
+        const stored = JSON.parse(raw) as Partial<AgentConfig>;
+        const promptPatch = this.migrateSystemPrompt(stored);
+        this.config = { ...DEFAULTS, ...stored, ...promptPatch };
+        migrated = promptPatch.systemPrompt !== undefined
+          && stored.systemPrompt !== promptPatch.systemPrompt;
       }
     } catch {
       this.config = { ...DEFAULTS };
+    }
+    if (migrated) {
+      this.save();
     }
   }
 
@@ -102,8 +94,26 @@ export class ConfigManager {
     return { ...this.config };
   }
 
+  getDefaultSystemPrompt(): string {
+    return DEFAULT_SYSTEM_PROMPT;
+  }
+
   update(patch: Partial<AgentConfig>): AgentConfig {
-    this.config = { ...this.config, ...patch };
+    const next = { ...this.config, ...patch };
+    if (patch.systemPrompt !== undefined) {
+      const trimmed = patch.systemPrompt.trim();
+      if (trimmed === DEFAULT_SYSTEM_PROMPT.trim()) {
+        next.systemPromptCustomized = false;
+        next.systemPromptRevision = SYSTEM_PROMPT_REVISION;
+      } else if (patch.systemPromptCustomized !== false) {
+        next.systemPromptCustomized = true;
+      }
+    }
+    if (patch.systemPromptCustomized === false) {
+      next.systemPrompt = DEFAULT_SYSTEM_PROMPT;
+      next.systemPromptRevision = SYSTEM_PROMPT_REVISION;
+    }
+    this.config = next;
     this.save();
     return this.get();
   }

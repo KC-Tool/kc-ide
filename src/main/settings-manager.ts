@@ -11,6 +11,8 @@ const DEFAULTS: AppSettings = {
   fontSize: 13,
   locale: 'zh',
   dismissedTemporalNotice: false,
+  dynamicBlurLevel: 2,
+  liquidGlassEnabled: false,
 };
 
 export class SettingsManager {

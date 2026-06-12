@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { DirEntry } from '../../shared/ipc';
+import Modal, { useModalClose } from './Modal';
 
 interface Props {
   initialPath: string;
@@ -66,7 +67,16 @@ function parentDir(p: string): string {
   return normalized.slice(0, idx);
 }
 
-export default function FileBrowser({ initialPath, onClose, onSelectDir }: Props) {
+export default function FileBrowser(props: Props) {
+  return (
+    <Modal onClose={props.onClose} panelClassName="modal-lg">
+      <FileBrowserContent {...props} />
+    </Modal>
+  );
+}
+
+function FileBrowserContent({ initialPath, onSelectDir }: Props) {
+  const requestClose = useModalClose();
   const [currentPath, setCurrentPath] = useState(initialPath || '');
   const [entries, setEntries] = useState<DirEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -115,18 +125,11 @@ export default function FileBrowser({ initialPath, onClose, onSelectDir }: Props
     }
   };
 
-  const handleOverlayClick = (e: React.MouseEvent) => {
-    if (e.target === e.currentTarget) {
-      onClose();
-    }
-  };
-
   return (
-    <div className="modal-overlay" onClick={handleOverlayClick}>
-      <div className="modal modal-lg">
+    <>
         <div className="modal-header">
           <h2>文件浏览</h2>
-          <button className="icon-btn" onClick={onClose}>
+          <button className="icon-btn" onClick={requestClose}>
             <IconX />
           </button>
         </div>
@@ -175,19 +178,21 @@ export default function FileBrowser({ initialPath, onClose, onSelectDir }: Props
         </div>
 
         <div className="modal-footer">
-          <button className="btn btn-ghost" onClick={onClose}>
+          <button className="btn btn-ghost" onClick={requestClose}>
             取消
           </button>
           <button
             className="btn btn-primary"
-            onClick={() => onSelectDir(currentPath)}
+            onClick={() => {
+              onSelectDir(currentPath);
+              requestClose();
+            }}
             disabled={!currentPath}
           >
             <IconCheck />
             选择此目录
           </button>
         </div>
-      </div>
-    </div>
+    </>
   );
 }

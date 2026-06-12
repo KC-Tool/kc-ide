@@ -3,6 +3,8 @@ import { computeLineDiff, countLines } from '../../shared/diff';
 import type { FileSnapshot } from '../../shared/ipc';
 import { extractPartialFileArgs } from '../../shared/tool-args';
 import { detectLanguageFromPath } from '../lib/highlight';
+import { getToolSummary } from '../lib/tool-summary';
+import { useI18n } from '../contexts/I18nContext';
 import CodeBlock from './CodeBlock';
 import FileDiffView from './FileDiffView';
 
@@ -18,22 +20,6 @@ interface ToolCallData {
 interface Props {
   toolCall: ToolCallData;
 }
-
-const TOOL_LABELS: Record<string, string> = {
-  read_file: '读取文件',
-  write_file: '写入文件',
-  list_dir: '列出目录',
-  shell: '执行命令',
-  grep: '搜索内容',
-  glob: '查找文件',
-  insert_code: '插入代码',
-  delegate_agent: '委派子 Agent',
-  delegate_agents_parallel: '并行委派',
-  spawn_agent: '临时子 Agent',
-  todo_add: '添加待办',
-  todo_complete: '完成待办',
-  todo_list: '列出待办',
-};
 
 function parseFileContent(toolCall: ToolCallData) {
   try {
@@ -124,10 +110,24 @@ function FilePreview({
   );
 }
 
+const FILE_WRITE_TOOLS = new Set(['write_file', 'insert_code']);
+
+function getOutputLabel(name: string, t: (key: string) => string): string {
+  if (FILE_WRITE_TOOLS.has(name)) return t('tool.output.write');
+  if (name === 'shell') return t('tool.output.exec');
+  return t('tool.output.result');
+}
+
 export default function ToolCallCard({ toolCall }: Props) {
+  const { locale, t } = useI18n();
   const isFileTool = toolCall.name === 'write_file' || toolCall.name === 'insert_code';
   const [expanded, setExpanded] = useState(isFileTool);
   const [panel, setPanel] = useState<'preview' | 'diff'>('preview');
+
+  const summary = useMemo(
+    () => getToolSummary(toolCall.name, toolCall.input, locale),
+    [toolCall.name, toolCall.input, locale],
+  );
 
   const fileInfo = useMemo(() => parseFileContent(toolCall), [toolCall.input, toolCall.name]);
   const outputStats = useMemo(() => parseOutputStats(toolCall.output), [toolCall.output]);
@@ -157,30 +157,61 @@ export default function ToolCallCard({ toolCall }: Props) {
     }
   }, [isFileTool, toolCall.status, canDiff]);
 
-  const label = TOOL_LABELS[toolCall.name] ?? toolCall.name;
   const statusClass = toolCall.status === 'running' ? 'tool-running'
     : toolCall.status === 'error' ? 'tool-error'
     : 'tool-done';
 
-  let inputDisplay = fileInfo.path;
-  if (!inputDisplay) {
-    try {
-      const parsed = JSON.parse(toolCall.input);
-      inputDisplay = parsed.path || parsed.command || parsed.pattern || toolCall.input;
-    } catch {
-      inputDisplay = toolCall.input.slice(0, 40);
-    }
-  }
-
   const displayLines = outputStats.lines ?? diffSummary?.newLines ?? lineCount;
   const showStatsBadge = isFileTool && toolCall.status === 'done' && displayLines > 0;
 
+  const outputLabel = useMemo(
+    () => getOutputLabel(toolCall.name, t),
+    [toolCall.name, t],
+  );
+
+  const outputLanguage = useMemo(() => {
+    if (toolCall.output.startsWith('Error')) return 'plaintext';
+    if (toolCall.name === 'shell') return 'bash';
+    return undefined;
+  }, [toolCall.output, toolCall.name]);
+
+  const simpleLabel = useMemo(() => {
+    try {
+      if (toolCall.name === 'list_dir' || toolCall.name === 'read_file') {
+        const parsed = JSON.parse(toolCall.input || '{}');
+        const path = parsed.path || '';
+        const basename = path.split(/[\\/]/).pop() || path;
+        if (toolCall.name === 'list_dir') {
+          return `Analyzed ${basename}`;
+        }
+        return `Read ${basename}`;
+      }
+      if (toolCall.name === 'grep' || toolCall.name === 'glob') {
+        const parsed = JSON.parse(toolCall.input || '{}');
+        const pattern = parsed.pattern || parsed.query || '';
+        return `${toolCall.name}: ${pattern}`;
+      }
+    } catch {
+      // JSON parse failed, fall back to summary
+    }
+    return `${summary.verb} ${summary.target || ''}`;
+  }, [toolCall.name, toolCall.input, summary]);
+
   return (
-    <div className={`tool-card ${statusClass}`}>
+    <div className={`tool-card tool-card-cursor ${statusClass}`}>
       <button type="button" className="tool-card-header" onClick={() => setExpanded(!expanded)}>
-        <span className="tool-card-icon tool-card-icon-text">{label.slice(0, 1)}</span>
-        <span className="tool-card-label">{label}</span>
-        <span className="tool-card-input" title={inputDisplay}>{inputDisplay}</span>
+        <span className="tool-card-status">
+          {toolCall.status === 'running' && <span className="spinner" />}
+          {toolCall.status === 'done' && (
+            <svg className="tool-card-check" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2">
+              <polyline points="3 8 6 11 13 5" />
+            </svg>
+          )}
+          {toolCall.status === 'error' && <span className="tool-card-error-mark">!</span>}
+        </span>
+        <span className="tool-card-summary">
+          <span className="tool-card-simple-label">{simpleLabel}</span>
+        </span>
         {showStatsBadge && diffSummary && (
           <span className="tool-card-stats-badge">
             {toolCall.fileSnapshot?.isNew ? (
@@ -199,11 +230,6 @@ export default function ToolCallCard({ toolCall }: Props) {
             <span className="tool-card-stat-add">{displayLines} 行</span>
           </span>
         )}
-        <span className="tool-card-status">
-          {toolCall.status === 'running' && <span className="spinner" />}
-          {toolCall.status === 'done' && '✓'}
-          {toolCall.status === 'error' && '✗'}
-        </span>
         <span className="tool-card-chevron">{expanded ? '▾' : '▸'}</span>
       </button>
 
@@ -247,12 +273,12 @@ export default function ToolCallCard({ toolCall }: Props) {
         <div className="tool-card-body">
           {toolCall.output && (
             <div className="tool-card-section">
-              <div className="tool-card-section-label">执行结果</div>
-              <CodeBlock compact>{toolCall.output}</CodeBlock>
+              <div className="tool-card-section-label">{outputLabel}</div>
+              <CodeBlock compact language={outputLanguage}>{toolCall.output}</CodeBlock>
             </div>
           )}
           <div className="tool-card-section">
-            <div className="tool-card-section-label">原始输入</div>
+            <div className="tool-card-section-label">{t('tool.input.raw')}</div>
             <CodeBlock compact language="json">{toolCall.input}</CodeBlock>
           </div>
         </div>

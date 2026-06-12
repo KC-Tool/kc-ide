@@ -3,6 +3,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import http from 'node:http';
+import https from 'node:https';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { AgentConfig } from '../shared/ipc.js';
@@ -10,7 +12,6 @@ import type { TodoItem } from '../shared/todo-types.js';
 import { formatTodosForAgent } from '../shared/todo-types.js';
 import { globalToolCache } from './tool-cache.js';
 import { wrapShellOutputWithTemporalAnchor } from './temporal-anchor.js';
-
 export interface ToolRunContext {
   sessionId?: string;
 }
@@ -66,7 +67,7 @@ export const TOOL_DEFINITIONS = [
     type: 'function' as const,
     function: {
       name: 'write_file',
-      description: 'Write content to a file. Creates the file if it does not exist, overwrites if it does. Creates parent directories as needed.',
+      description: 'Write content to a file. Creates the file if it does not exist, overwrites if it does. Creates parent directories as needed. IMPORTANT: This tool only writes files and does NOT execute them. Files are never automatically executed after writing.',
       parameters: {
         type: 'object',
         properties: {
@@ -95,7 +96,7 @@ export const TOOL_DEFINITIONS = [
     type: 'function' as const,
     function: {
       name: 'shell',
-      description: 'Execute a shell command and return stdout/stderr output. Use for git operations, running scripts, installing packages, etc.',
+      description: 'Execute a shell command and return stdout/stderr output. Use for git operations, running scripts, installing packages, etc. SECURITY WARNING: This tool can execute arbitrary commands. Never execute files that were just written by the AI without explicit user confirmation. Always verify the safety of commands before execution.',
       parameters: {
         type: 'object',
         properties: {
@@ -200,6 +201,36 @@ export const TOOL_DEFINITIONS = [
       parameters: { type: 'object', properties: {} },
     },
   },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'web_search',
+      description: 'Search the web for information. Returns search results with titles, URLs, and snippets. Use this when you need current information, documentation, libraries, error solutions, or anything that requires internet access beyond the local codebase.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'The search query to look up on the web' },
+          numResults: { type: 'number', description: 'Number of results to return (default 10, max 50)' },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'web_fetch',
+      description: 'Fetch the content of a web page. Returns the page title and text content (HTML stripped). Use this to read full pages from search results, documentation, or any public URL.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'The URL to fetch content from' },
+          timeout: { type: 'number', description: 'Timeout in milliseconds (default 15000, max 30000)' },
+        },
+        required: ['url'],
+      },
+    },
+  },
 ];
 
 // ---- 工具执行器 ----
@@ -234,6 +265,76 @@ async function toolWriteFile(args: { path: string; content: string }, cwd: strin
   return `File written: ${fullPath} (${lineCount} lines, ${args.content.length} bytes)`;
 }
 
+interface AnchorMatch {
+  lineIdx: number;
+  span: number;
+  /** 仅匹配到锚点第一行（多行锚点未完整命中） */
+  partial?: boolean;
+}
+
+function normalizeNewlines(text: string): string {
+  return text.replace(/\r\n/g, '\n');
+}
+
+function dedupeAnchorLines(anchor: string): string[] {
+  const uniqueLines: string[] = [];
+  const seen = new Set<string>();
+  for (const line of anchor.trim().split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed && !seen.has(trimmed)) {
+      seen.add(trimmed);
+      uniqueLines.push(line.trimEnd());
+    }
+  }
+  return uniqueLines;
+}
+
+/** 在文件内容中定位锚点（支持多行子串、连续行、单行、首行回退） */
+function findAnchorInFile(original: string, anchor: string): AnchorMatch | null {
+  const normOriginal = normalizeNewlines(original);
+  const anchorLines = dedupeAnchorLines(anchor);
+  if (anchorLines.length === 0) return null;
+
+  const normAnchor = anchorLines.join('\n');
+  const fileLines = normOriginal.split('\n');
+
+  // 1. 多行/单行子串精确匹配（最可靠）
+  const pos = normOriginal.indexOf(normAnchor);
+  if (pos !== -1) {
+    const lineIdx = normOriginal.slice(0, pos).split('\n').length - 1;
+    return { lineIdx, span: anchorLines.length };
+  }
+
+  // 2. 连续行逐行包含匹配
+  if (anchorLines.length > 1) {
+    for (let i = 0; i <= fileLines.length - anchorLines.length; i++) {
+      let matched = true;
+      for (let j = 0; j < anchorLines.length; j++) {
+        if (!fileLines[i + j].includes(anchorLines[j].trim())) {
+          matched = false;
+          break;
+        }
+      }
+      if (matched) return { lineIdx: i, span: anchorLines.length };
+    }
+  }
+
+  // 3. 单行整段包含
+  const singleIdx = fileLines.findIndex((line) => line.includes(normAnchor));
+  if (singleIdx !== -1) {
+    return { lineIdx: singleIdx, span: 1 };
+  }
+
+  // 4. 回退：仅匹配锚点第一行
+  const firstLine = anchorLines[0].trim();
+  const firstIdx = fileLines.findIndex((line) => line.includes(firstLine));
+  if (firstIdx !== -1) {
+    return { lineIdx: firstIdx, span: 1, partial: anchorLines.length > 1 };
+  }
+
+  return null;
+}
+
 /**
  * 精确保留代码插入/替换工具
  * 在已有文件中通过锚点文本定位，支持插入前、插入后、替换三种操作
@@ -253,12 +354,13 @@ async function toolInsertCode(
   const original = fs.readFileSync(fullPath, 'utf8');
   const lines = original.split('\n');
 
-  // 查找锚点行（第一个匹配的行）
-  const anchorIdx = lines.findIndex(line => line.includes(args.anchor));
-  if (anchorIdx === -1) {
-    return `Error: Anchor text not found in file: "${args.anchor}"`;
+  const anchorMatch = findAnchorInFile(original, args.anchor);
+  if (!anchorMatch) {
+    const preview = dedupeAnchorLines(args.anchor).join('\n').slice(0, 120);
+    return `Error: Anchor text not found in file: "${preview}${preview.length >= 120 ? '…' : ''}". Use a shorter unique anchor (e.g. a function signature), or use write_file for large rewrites.`;
   }
 
+  const { lineIdx: anchorIdx, span: anchorSpan, partial } = anchorMatch;
   const insertLines = args.content.split('\n');
 
   switch (args.action) {
@@ -267,13 +369,12 @@ async function toolInsertCode(
       break;
     }
     case 'insert_after': {
-      lines.splice(anchorIdx + 1, 0, ...insertLines);
+      lines.splice(anchorIdx + anchorSpan, 0, ...insertLines);
       break;
     }
     case 'replace': {
-      const replaceCount = (args.replaceLines ?? 0);
-      // replaceCount 表示锚点行之后额外替换的行数（0=仅锚点行）
-      const totalReplace = Math.min(replaceCount + 1, lines.length - anchorIdx);
+      const extraReplace = args.replaceLines ?? 0;
+      const totalReplace = Math.min(anchorSpan + extraReplace, lines.length - anchorIdx);
       lines.splice(anchorIdx, totalReplace, ...insertLines);
       break;
     }
@@ -291,7 +392,8 @@ async function toolInsertCode(
     insert_after: '后插入',
     replace: '替换',
   };
-  return `Code ${actionLabel[args.action] ?? args.action}: ${fullPath} (${insertLineCount} lines changed, file now ${newLineCount} lines, anchor line ${anchorIdx + 1})`;
+  const partialNote = partial ? ', partial anchor (first line only)' : '';
+  return `Code ${actionLabel[args.action] ?? args.action}: ${fullPath} (${insertLineCount} lines changed, file now ${newLineCount} lines, anchor line ${anchorIdx + 1}${partialNote})`;
 }
 
 async function toolListDir(args: { path: string }, cwd: string): Promise<string> {
@@ -320,6 +422,63 @@ async function toolListDir(args: { path: string }, cwd: string): Promise<string>
 async function toolShell(args: { command: string; cwd?: string; timeout?: number }, cwd: string): Promise<string> {
   const workDir = args.cwd ? resolvePath(args.cwd, cwd) : cwd;
   const timeout = args.timeout || 30000;
+
+  // 安全检查：只允许执行powershell和cmd脚本，禁止执行其他编程文件
+  const command = args.command.trim();
+  
+  // 首先检查是否包含编程文件扩展名 - 如果包含，直接阻止
+  const programmingFileExtensions = ['.js', '.py', '.sh', '.rb', '.pl', '.php', '.java', '.go', '.rs', '.ts', '.tsx', '.jsx', '.c', '.cpp', '.h', '.hpp'];
+  const hasProgrammingFile = programmingFileExtensions.some(ext => command.includes(ext));
+  
+  if (hasProgrammingFile) {
+    // 检查是否是允许的特殊情况（如git命令中的文件名）
+    const isGitCommand = /^git\s/.test(command);
+    const isListCommand = /^(ls|dir|find|grep)\s/.test(command);
+    const isReadCommand = /^(cat|less|more|head|tail)\s/.test(command);
+    
+    if (!isGitCommand && !isListCommand && !isReadCommand) {
+      return `Error: SECURITY - Command contains programming file extension. Programming files can only be modified using write_file or insert_code tools, not executed. Only PowerShell and CMD scripts can be executed via shell tool. Command: ${command}`;
+    }
+  }
+  
+  // 禁止的解释器命令
+  const forbiddenInterpreters = ['node', 'python', 'python3', 'bash', 'sh', 'perl', 'ruby', 'php', 'java', 'go', 'rust'];
+  const commandWords = command.split(/\s+/);
+  const firstWord = commandWords[0]?.toLowerCase();
+  
+  if (forbiddenInterpreters.includes(firstWord)) {
+    return `Error: SECURITY - Cannot use ${firstWord} interpreter. Programming files can only be modified, not executed. Only PowerShell and CMD scripts can be executed via shell tool. Command: ${command}`;
+  }
+  
+  // 禁止直接执行脚本文件
+  if (/^\.\//.test(command) || /^\.\.\//.test(command)) {
+    return `Error: SECURITY - Cannot execute scripts directly using ./ or ../ . Programming files can only be modified using write_file or insert_code tools, not executed. Only PowerShell and CMD scripts can be executed via shell tool. Command: ${command}`;
+  }
+  
+  // 禁止添加执行权限
+  if (/chmod\s+\+x/.test(command)) {
+    return `Error: SECURITY - Cannot add execute permissions with chmod +x. Programming files can only be modified, not executed. Command: ${command}`;
+  }
+
+  // 允许的执行模式（白名单）
+  const allowedPatterns = [
+    /^powershell\s+/i,
+    /^pwsh\s+/i,
+    /^cmd\s+/i,
+    /^npm\s+(run|start|test|build|dev|install)/i,
+    /^yarn\s+(run|start|test|build|dev|install)/i,
+    /^pnpm\s+(run|start|test|build|dev|install)/i,
+    /^git\s+/i,
+    /^(ls|dir|cd|pwd|echo|cat|mkdir|rm|cp|mv|grep|find|which|where|cls|clear)\s+/i,
+  ];
+  
+  const isAllowed = allowedPatterns.some(pattern => pattern.test(command));
+  
+  if (!isAllowed && command.length > 0) {
+    // 如果不在白名单中，阻止执行
+    return `Error: SECURITY - Command not in allowed list. Only PowerShell, CMD, npm/yarn/pnpm scripts, git, and basic system commands are allowed. Programming files cannot be executed. Command: ${command}`;
+  }
+
   try {
     const { stdout, stderr } = await execAsync(args.command, {
       cwd: workDir,
@@ -443,6 +602,137 @@ async function toolGlob(args: { pattern: string; path: string }, cwd: string): P
   return results.sort().join('\n') + (results.length >= maxResults ? `\n\n(showing first ${maxResults} files)` : '');
 }
 
+// ---- Web 搜索与抓取工具 ----
+
+/** 使用 DuckDuckGo HTML 版无广告搜索 */
+async function toolWebSearch(args: { query: string; numResults?: number }, cwd: string): Promise<string> {
+  const num = Math.min(50, Math.max(1, args.numResults ?? 10));
+  const queryEncoded = encodeURIComponent(args.query);
+  const url = `https://html.duckduckgo.com/html/?q=${queryEncoded}`;
+
+  try {
+    const response = await fetchWithTimeout(url, 10000);
+    // 解析 DuckDuckGo HTML 结果
+    const results: Array<{ title: string; url: string; snippet: string }> = [];
+    // 匹配结果条目：<a class="result__a" href="...">Title</a>后面跟 <a class="result__snippet" href="...">snippet</a>
+    const itemRegex = /<a class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
+    let match;
+    let count = 0;
+    while ((match = itemRegex.exec(response)) !== null && count < num) {
+      const rawUrl = match[1];
+      const title = stripHtml(match[2]);
+      const snippet = stripHtml(match[3]);
+      // 跳过豆包等站内结果
+      if (rawUrl.includes('doubao.com') || rawUrl.includes('bytecdn.cn')) continue;
+      // DuckDuckGo HTML 结果相对 URL
+      const resultUrl = rawUrl.startsWith('http') ? rawUrl : `https://html.duckduckgo.com${rawUrl}`;
+      results.push({ title, url: resultUrl, snippet });
+      count++;
+    }
+    if (results.length === 0) {
+      // 备用：简单正则
+      const altRegex = /<a[^>]*class="[^"]*result[^"]*"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+      while ((match = altRegex.exec(response)) !== null && results.length < num) {
+        const rawUrl = match[1];
+        if (!rawUrl.startsWith('http') || rawUrl.includes('duckduckgo') || rawUrl.includes('doubao.com')) continue;
+        const title = stripHtml(match[2]).trim();
+        if (title && !title.includes('<') && title.length > 5) {
+          results.push({ title, url: rawUrl.startsWith('http') ? rawUrl : `https://html.duckduckgo.com${rawUrl}`, snippet: '' });
+        }
+      }
+    }
+    if (results.length === 0) return `No search results found for: "${args.query}"`;
+
+    return results
+      .map((r, i) => `${i + 1}. ${r.title}\n   URL: ${r.url}\n   ${r.snippet ? `Snippet: ${r.snippet}` : ''}`)
+      .join('\n\n');
+  } catch (err: any) {
+    return `Search failed: ${err.message}`;
+  }
+}
+
+/** 抓取网页正文（自动提取 title + text） */
+async function toolWebFetch(args: { url: string; timeout?: number }, cwd: string): Promise<string> {
+  const timeoutMs = Math.min(30000, Math.max(1000, args.timeout ?? 15000));
+  try {
+    const html = await fetchWithTimeout(args.url, timeoutMs);
+    const title = extractHtmlTitle(html) || '';
+    const text = extractTextFromHtml(html);
+    return `${title ? `Title: ${title}\n\n` : ''}${text.slice(0, 8000)}${text.length > 8000 ? '\n\n[...content truncated]' : ''}`;
+  } catch (err: any) {
+    return `Fetch failed: ${err.message}`;
+  }
+}
+
+function fetchWithTimeout(url: string, timeoutMs: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const parsedUrl = new URL(url);
+    const protocol = parsedUrl.protocol === 'https:' ? https : http;
+    const req = protocol.get(parsedUrl.toString(), { timeout: timeoutMs }, (res) => {
+      // 处理重定向
+      if ([301, 302, 303, 307, 308].includes(res.statusCode ?? 0) && res.headers.location) {
+        fetchWithTimeout(res.headers.location, timeoutMs).then(resolve).catch(reject);
+        return;
+      }
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer) => chunks.push(chunk));
+      res.on('end', () => {
+        const buffer = Buffer.concat(chunks);
+        const encoding = getHtmlEncoding(buffer, res.headers['content-type'] as string) || 'utf8';
+        try {
+          resolve(buffer.toString(encoding as BufferEncoding));
+        } catch {
+          resolve(buffer.toString('utf8'));
+        }
+      });
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error(`Timeout after ${timeoutMs}ms`));
+    });
+    req.on('error', reject);
+  });
+}
+
+function getHtmlEncoding(buffer: Buffer, contentType?: string): string | null {
+  if (!contentType) {
+    // 从 HTML 字节顺序标记检测
+    if (buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) return 'utf8';
+    if (buffer[0] === 0xff && buffer[1] === 0xfe) return 'utf16le';
+    if (buffer[0] === 0xfe && buffer[1] === 0xff) return 'utf16be';
+    return null;
+  }
+  const match = contentType.match(/charset=["']?([^;"']+)/i);
+  return match ? match[1].trim() : null;
+}
+
+function extractHtmlTitle(html: string): string {
+  const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return m ? stripHtml(m[1]).trim() : '';
+}
+
+function extractTextFromHtml(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<head[\s\S]*?<\/head>/gi, '')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code, 10)))
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function stripHtml(html: string): string {
+  return html.replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').trim();
+}
+
 // 尝试解析 JSON，如果失败则尝试自动修复常见问题
 function tryParseJson(raw: string): any {
   // 先尝试标准解析
@@ -538,12 +828,20 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   'delegate_agents_parallel': 'delegate_agents_parallel',
   'spawnAgent': 'spawn_agent',
   'spawn_agent': 'spawn_agent',
+  'webSearch': 'web_search',
+  'web_search': 'web_search',
+  'searchWeb': 'web_search',
+  'webFetch': 'web_fetch',
+  'web_fetch': 'web_fetch',
+  'fetchUrl': 'web_fetch',
+  'fetch_url': 'web_fetch',
 };
 
 const FILE_TOOLS = ['read_file', 'write_file', 'list_dir', 'shell', 'grep', 'glob', 'insert_code'] as const;
 const TODO_TOOLS_LIST = ['todo_add', 'todo_complete', 'todo_list'] as const;
 const DELEGATE_TOOLS = ['delegate_agent', 'delegate_agents_parallel', 'spawn_agent'] as const;
-const ALL_KNOWN_TOOLS = [...FILE_TOOLS, ...TODO_TOOLS_LIST, ...DELEGATE_TOOLS] as const;
+const WEB_TOOLS = ['web_search', 'web_fetch'] as const;
+const ALL_KNOWN_TOOLS = [...FILE_TOOLS, ...TODO_TOOLS_LIST, ...DELEGATE_TOOLS, ...WEB_TOOLS] as const;
 
 type DelegateRunner = (
   name: string,
@@ -745,8 +1043,19 @@ export async function executeTool(
       case 'glob':
         output = await toolGlob(args, cwd);
         break;
+      case 'web_search':
+        output = await toolWebSearch(args, cwd);
+        break;
+      case 'web_fetch':
+        output = await toolWebFetch(args, cwd);
+        break;
       default:
         return { output: `Error: Unknown tool: ${name}`, isError: true };
+    }
+
+    // Web 工具永不缓存（结果随时效性影响）
+    if (WEB_TOOLS.includes(normalizedName as typeof WEB_TOOLS[number])) {
+      return { output, isError: output.startsWith('Error:') };
     }
 
     globalToolCache.set(normalizedName, argsJson, cwd, output, output.startsWith('Error:'));

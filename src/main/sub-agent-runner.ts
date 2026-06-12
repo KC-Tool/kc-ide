@@ -7,8 +7,9 @@ import { getTemporalAnchorSystemBlock, getTemporalAnchorWorkspaceLine } from './
 import { SUB_AGENT_TOOL_DEFINITIONS } from './team-delegate.js';
 
 const SUB_AGENT_BASE = `You are a Koder sub-agent working on a delegated task.
-You have file and shell tools. Do NOT delegate to other agents.
-Keep responses focused on your assigned task only. No emoji.`;
+You have file and shell tools (read_file, write_file, insert_code, shell, grep, glob). Do NOT delegate to other agents.
+Keep responses focused on your assigned task only. No emoji.
+You are a REAL separate API session — not the lead coordinator role-playing.`;
 
 export interface SubAgentRunParams {
   memberId: string;

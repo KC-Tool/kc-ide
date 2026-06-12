@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { applyAppFrameRate } from './lib/apply-frame-rate';
 import type { AppInfo, Session, ChatMessage } from '../shared/ipc';
 import { ThemeProvider } from './contexts/ThemeContext';
 import Chat from './components/Chat';
@@ -35,6 +36,17 @@ function AppInner() {
   useEffect(() => {
     refreshAppInfo();
   }, [refreshAppInfo]);
+
+  useEffect(() => {
+    void window.koder.getAgentConfig().then((cfg) => {
+      applyAppFrameRate(document.documentElement, cfg.appFrameRate ?? 60);
+    });
+    return window.koder.onConfigUpdated((patch) => {
+      if (patch.appFrameRate != null) {
+        applyAppFrameRate(document.documentElement, patch.appFrameRate);
+      }
+    });
+  }, []);
 
   useEffect(() => {
     if (settings && !settings.dismissedTemporalNotice) {
@@ -147,6 +159,11 @@ function AppInner() {
   return (
     <ThemeProvider>
       <div className="app-shell">
+        <div className="app-bg-effects" aria-hidden="true">
+          <div className="app-bg-orb app-bg-orb-1" />
+          <div className="app-bg-orb app-bg-orb-2" />
+          <div className="app-bg-orb app-bg-orb-3" />
+        </div>
         <Sidebar
           info={info}
           currentSessionId={currentSession?.id ?? null}
@@ -199,7 +216,6 @@ function AppInner() {
                 bumpSessions();
               });
             }
-            setShowFileBrowser(false);
           }}
         />
       )}

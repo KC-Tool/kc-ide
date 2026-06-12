@@ -45,6 +45,27 @@ export interface AgentConfig {
   toolCacheMaxEntries: number;
   /** 工具缓存 TTL（毫秒），0 = 仅按文件 mtime 失效 */
   toolCacheTtlMs: number;
+  /** 内置系统提示词版本（随代码递增，用于自动同步默认提示词） */
+  systemPromptRevision?: number;
+  /** 用户是否手动编辑过系统提示词（true 时不自动覆盖） */
+  systemPromptCustomized?: boolean;
+  /** 应用目标帧率（写入 ~/.koder/config.json，影响窗口与动画节奏） */
+  appFrameRate?: number;
+}
+
+// ---- Plan 保存 ----
+
+export interface PlanSaveRequest {
+  sessionId: string;
+  title?: string;
+  markdown: string;
+  cwd?: string;
+}
+
+export interface PlanSaveResult {
+  filePath: string;
+  fileName: string;
+  createdAt: number;
 }
 
 // ---- Agent 工具调用 ----
@@ -115,6 +136,11 @@ export interface FileSnapshot {
   newContent?: string;
 }
 
+import type { InteractionMode } from './agent-modes.js';
+
+/** Agent 交互模式：Agent 执行 / Plan 先规划 */
+export type { InteractionMode } from './agent-modes.js';
+
 export interface AgentRunRequest {
   sessionId: string;
   prompt: string;
@@ -124,6 +150,8 @@ export interface AgentRunRequest {
   /** 显式指定 Team，或 @create-team 模式 */
   teamId?: string;
   createTeam?: boolean;
+  /** 交互模式，默认 agent */
+  interactionMode?: InteractionMode;
 }
 
 // ---- 会话管理 ----
@@ -221,6 +249,10 @@ export interface AppSettings {
   dismissedTemporalNotice?: boolean;
   /** 新会话默认激活的 Agent Team */
   defaultTeamId?: string;
+  /** 背景动态模糊等级 0–4（0 关闭） */
+  dynamicBlurLevel?: number;
+  /** 液态玻璃（毛玻璃面板） */
+  liquidGlassEnabled?: boolean;
 }
 
 export type {
@@ -309,6 +341,15 @@ export interface KoderAPI {
 
   // 消息保存通知（主进程→渲染进程）
   onMessageSaved(cb: (payload: { sessionId: string }) => void): Unsubscribe;
+
+  // Plan
+  savePlan(req: PlanSaveRequest): Promise<PlanSaveResult>;
+  onPlanSaved(cb: (payload: PlanSaveResult & { markdown: string; sessionId: string }) => void): Unsubscribe;
+
+  // 配置变更（主进程 → 渲染进程）
+  onConfigUpdated(cb: (payload: { appFrameRate?: number; maxContextTokens?: number }) => void): Unsubscribe;
+
+  onSessionsUpdated(cb: () => void): Unsubscribe;
 }
 
 declare global {

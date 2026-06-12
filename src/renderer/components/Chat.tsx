@@ -1,19 +1,32 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import type { AgentEvent, ChatMessage, FileSnapshot, MessageSegment, Session, Unsubscribe } from '../../shared/ipc';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import type { AgentEvent, ChatMessage, FileSnapshot, Session, Unsubscribe } from '../../shared/ipc';
 import type { SkillListItem } from '../../shared/skills-types';
 import { formatAtHelpLocalized, formatHelpLocalized, formatSkillsListLocalized, formatTeamsListLocalized } from '../../shared/i18n';
 import { parseSlashCommand } from '../../shared/skills-types';
-import { buildAtMenuItems, parseAtCommand } from '../../shared/team-types';
+import { parseAtCommand } from '../../shared/team-types';
 import type { TeamListItem, TodoItem } from '../../shared/ipc';
 import TodoPanel from './TodoPanel';
 import SubAgentPanel, { type SubAgentRun } from './SubAgentPanel';
 import { useI18n } from '../contexts/I18nContext';
-import CodeBlock from './CodeBlock';
-import ToolCallCard from './ToolCallCard';
-import ThinkingBlock from './ThinkingBlock';
-import SlashCommandMenu, { buildSlashMenuItems, type SlashMenuItem } from './SlashCommandMenu';
+import Modal, { useModalClose } from './Modal';
+import ChatHeader from './ChatHeader';
+import ChatMessageList from './ChatMessageList';
+import ChatComposer from './ChatComposer';
+import type { InteractionMode } from '../../shared/agent-modes';
+import { PLAN_BUILD_USER_PREFIX } from '../../shared/agent-modes';
+import PlanPanel from './PlanPanel';
+import PlanModal from './PlanModal';
+import { formatTokenCount } from '../lib/format-tokens';
+import { applyAppFrameRate } from '../lib/apply-frame-rate';
+import { hydrateMessagesProgressive } from '../lib/hydrate-messages';
+import { createStickToBottomScheduler, isNearBottom, scrollToBottomSmooth } from '../lib/stick-to-bottom';
+import {
+  extractAssistantText,
+  segmentsToPersisted,
+  type ToolCallInline,
+  type UiMessage,
+  type UiSegment,
+} from '../lib/chat-message-model';
 
 interface Props {
   session: Session | null;
@@ -22,32 +35,6 @@ interface Props {
   onWorkspaceChange: () => void;
   onRollback: () => void;
 }
-
-interface ToolCallInline {
-  id: string;
-  name: string;
-  input: string;
-  output: string;
-  status: 'running' | 'done' | 'error';
-  fileSnapshot?: {
-    path: string;
-    originalContent: string;
-    isNew: boolean;
-    newContent?: string;
-  };
-}
-
-interface ThinkingSegment {
-  id: string;
-  content: string;
-  streaming: boolean;
-}
-
-/** 按到来顺序排列的消息片段（用于按序渲染） */
-type UiSegment =
-  | { type: 'thinking'; id: string; content: string; streaming: boolean }
-  | { type: 'text'; id: string; content: string }
-  | { type: 'tool_call'; id: string; toolCall: ToolCallInline };
 
 function closeStreamingThinking(segments: UiSegment[]): UiSegment[] {
   return segments.map(s => s.type === 'thinking' && s.streaming ? { ...s, streaming: false } : s);
@@ -138,151 +125,21 @@ function patchFromSegments(segments: UiSegment[]) {
   return { segments, ...deriveFromSegments(segments) };
 }
 
-function segmentsToPersisted(segments: UiSegment[]): MessageSegment[] {
-  return segments.map(seg => {
-    if (seg.type === 'thinking') {
-      return { type: 'thinking', id: seg.id, content: seg.content };
-    }
-    if (seg.type === 'text') {
-      return { type: 'text', id: seg.id, content: seg.content };
-    }
-    return { type: 'tool_call', id: seg.id, toolCall: { ...seg.toolCall } };
-  });
-}
-
-function chatMessageToUi(m: ChatMessage): UiMessage {
-  if (m.segments && m.segments.length > 0) {
-    const segments: UiSegment[] = m.segments.flatMap((seg): UiSegment[] => {
-      if (seg.type === 'thinking') {
-        return [{ type: 'thinking', id: seg.id, content: seg.content ?? '', streaming: false }];
-      }
-      if (seg.type === 'text') {
-        return [{ type: 'text', id: seg.id, content: seg.content ?? '' }];
-      }
-      if (seg.type === 'tool_call' && seg.toolCall) {
-        return [{ type: 'tool_call', id: seg.id, toolCall: seg.toolCall }];
-      }
-      return [];
-    });
-    return {
-      id: m.id,
-      role: m.role,
-      timestamp: m.timestamp,
-      streaming: false,
-      ...deriveFromSegments(segments),
-      segments,
-    };
-  }
-
-  // 旧数据兼容：无 segments 时按 thinking → text → tools 顺序
-  const segments: UiSegment[] = [];
-  if (m.thinking) {
-    segments.push({ type: 'thinking', id: crypto.randomUUID(), content: m.thinking, streaming: false });
-  }
-  if (m.text) {
-    segments.push({ type: 'text', id: crypto.randomUUID(), content: m.text });
-  }
-  m.toolCalls?.forEach(tc => {
-    segments.push({ type: 'tool_call', id: tc.id, toolCall: tc });
-  });
-
-  return {
-    id: m.id,
-    role: m.role,
-    text: m.text,
-    timestamp: m.timestamp,
-    toolCalls: m.toolCalls ?? [],
-    streaming: false,
-    thinkingSegments: m.thinking
-      ? [{ id: crypto.randomUUID(), content: m.thinking, streaming: false }]
-      : [],
-    segments,
-  };
-}
-
-interface UiMessage {
-  id: string;
-  role: 'user' | 'assistant' | 'system';
-  text: string;
-  timestamp: number;
-  toolCalls: ToolCallInline[];
-  streaming?: boolean;
-  thinkingSegments: ThinkingSegment[];
-  /** 按到来顺序排列的事件列表，决定渲染顺序 */
-  segments: UiSegment[];
-}
-
-// SVG icons
-const IconSend = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" />
-  </svg>
-);
-const IconStop = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <rect x="6" y="6" width="12" height="12" rx="2" />
-  </svg>
-);
-const IconChat = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-  </svg>
-);
-const IconFolder = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-  </svg>
-);
-const IconRollback = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <polyline points="1 4 1 10 7 10" />
-    <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
-  </svg>
-);
-
-// 解析消息文本，提取工具调用标记，返回可渲染片段
-function parseMessageContent(text: string, toolCalls: ToolCallInline[]) {
-  // 移除文本中的标记（它们只是内部跟踪用的）
-  const cleanText = text
-    .replace(/\n<<TOOL_CALL:.*?>>/g, '')
-    .replace(/\n<<TOOL_RESULT:.*?>>/g, '');
-
-  return cleanText;
-}
-
-// Markdown 渲染
-function renderMarkdown(text: string) {
-  return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={{
-        code({ className, children, ...rest }) {
-          const match = /language-(\w+)/.exec(className || '');
-          const codeStr = String(children).replace(/\n$/, '');
-          if (match || codeStr.includes('\n')) {
-            return <CodeBlock language={match?.[1] ?? ''}>{codeStr}</CodeBlock>;
-          }
-          return <code className={className} {...rest}>{children}</code>;
-        },
-      }}
-    >
-      {text}
-    </ReactMarkdown>
-  );
-}
-
 export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorkspaceChange, onRollback }: Props) {
-  const { t, locale } = useI18n();
+  const { t, locale, settings } = useI18n();
   const [uiMessages, setUiMessages] = useState<UiMessage[]>([]);
-  const [input, setInput] = useState('');
+  const [messagesHydrating, setMessagesHydrating] = useState(false);
   const [running, setRunning] = useState(false);
+  const skillsRef = useRef<SkillListItem[]>([]);
+  const teamsRef = useRef<TeamListItem[]>([]);
   const [unsubscribe, setUnsubscribe] = useState<Unsubscribe | null>(null);
 
   // 回退确认弹窗状态
   const [pendingRollback, setPendingRollback] = useState<number | null>(null);
   // Toast 通知
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
-  // 上下文占用显示（默认 200K）
+  const maxContextRef = useRef(200000);
+  // 上下文占用显示（max 来自设置 → 模型 → 最大上下文）
   const [contextUsage, setContextUsage] = useState<{
     current: number;
     max: number;
@@ -299,31 +156,87 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
     toolCacheMisses?: number;
   }>({ current: 0, max: 200000 });
   // 上下文详情面板展开状态
-  const [showContextDetail, setShowContextDetail] = useState(false);
-  const [skills, setSkills] = useState<SkillListItem[]>([]);
-  const [teams, setTeams] = useState<TeamListItem[]>([]);
-  const [slashMenuOpen, setSlashMenuOpen] = useState(false);
-  const [atMenuOpen, setAtMenuOpen] = useState(false);
-  const [slashSelected, setSlashSelected] = useState(0);
+  const [showContextDetail, setShowContextDetail] = useState(true);
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [todoPanelCollapsed, setTodoPanelCollapsed] = useState(false);
   const [subagentRuns, setSubagentRuns] = useState<SubAgentRun[]>([]);
+  const [agentMode, setAgentMode] = useState<InteractionMode>('agent');
+  const [pendingPlan, setPendingPlan] = useState<string | null>(null);
+  const [pendingPlanPath, setPendingPlanPath] = useState<string | null>(null);
+  const [planModalOpen, setPlanModalOpen] = useState(false);
+  const agentModeRef = useRef<InteractionMode>('agent');
+  const [modelName, setModelName] = useState('');
+  const [modelConfigured, setModelConfigured] = useState(false);
+  const [showScrollBottom, setShowScrollBottom] = useState(false);
+  useEffect(() => {
+    agentModeRef.current = agentMode;
+    if (agentMode !== 'plan') {
+      setPendingPlan(null);
+      setPendingPlanPath(null);
+      setPlanModalOpen(false);
+    }
+  }, [agentMode]);
 
+  // 切换会话时强制重置为 agent 模式，避免 plan 状态污染新会话
+  useEffect(() => {
+    setAgentMode('agent');
+    setPendingPlan(null);
+    setPendingPlanPath(null);
+    setPlanModalOpen(false);
+  }, [session]);
+
+  const applyAgentConfig = useCallback((cfg: { maxContextTokens?: number; appFrameRate?: number }) => {
+    if (cfg.maxContextTokens != null && cfg.maxContextTokens > 0) {
+      maxContextRef.current = cfg.maxContextTokens;
+      setContextUsage((prev) => ({ ...prev, max: cfg.maxContextTokens! }));
+    }
+    if (cfg.appFrameRate != null) {
+      applyAppFrameRate(document.documentElement, cfg.appFrameRate);
+    }
+  }, []);
+
+  useEffect(() => {
+    void window.koder.getAgentConfig().then(applyAgentConfig);
+    return window.koder.onConfigUpdated(applyAgentConfig);
+  }, [applyAgentConfig]);
+
+  useEffect(() => {
+    return window.koder.onPlanSaved((payload) => {
+      if (session && payload.sessionId !== session.id) return;
+      setPendingPlan(payload.markdown);
+      setPendingPlanPath(payload.filePath);
+      setPlanModalOpen(true);
+    });
+  }, [session?.id]);
+
+  const stickToBottomRef = useRef(true);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const stickScrollRef = useRef(createStickToBottomScheduler(() => scrollRef.current));
   const messagesRef = useRef<UiMessage[]>(uiMessages);
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const currentAssistantId = useRef<string | null>(null);
   const currentToolCalls = useRef<ToolCallInline[]>([]);
 
-  // session 切换时重置
+  // session 切换时分块加载消息，避免阻塞输入
   useEffect(() => {
-    if (session) {
-      setUiMessages(session.messages.map(chatMessageToUi));
-    } else {
+    let cancelled = false;
+
+    if (!session) {
       setUiMessages([]);
+      setMessagesHydrating(false);
+      setRunning(false);
+      setContextUsage({ current: 0, max: maxContextRef.current });
+      setShowContextDetail(false);
+      currentAssistantId.current = null;
+      currentToolCalls.current = [];
+      if (unsubscribe) {
+        unsubscribe();
+        setUnsubscribe(null);
+      }
+      return;
     }
+
     setRunning(false);
-    setContextUsage({ current: 0, max: 200000 });
+    setContextUsage({ current: 0, max: maxContextRef.current });
     setShowContextDetail(false);
     currentAssistantId.current = null;
     currentToolCalls.current = [];
@@ -331,71 +244,30 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
       unsubscribe();
       setUnsubscribe(null);
     }
+
+    setUiMessages([]);
+    setMessagesHydrating(true);
+    void hydrateMessagesProgressive(session.messages, (msgs, hydrating) => {
+      if (cancelled) return;
+      setUiMessages(msgs);
+      setMessagesHydrating(hydrating);
+    });
+
+    return () => { cancelled = true; };
   }, [session?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     messagesRef.current = uiMessages;
   }, [uiMessages]);
 
-  const reloadSkills = useCallback(() => {
-    void window.koder.getSkills().then(setSkills);
-  }, []);
-
-  useEffect(() => {
-    reloadSkills();
-    return window.koder.onSkillsChanged(reloadSkills);
-  }, [reloadSkills]);
-
-  const reloadTeams = useCallback(() => {
-    void window.koder.getTeams().then(setTeams);
-  }, []);
-
-  useEffect(() => {
-    reloadTeams();
-    return window.koder.onTeamsChanged(reloadTeams);
-  }, [reloadTeams]);
-
-  useEffect(() => {
-    if (input.startsWith('/')) reloadSkills();
-  }, [input, reloadSkills]);
-
-  const slashFilter = input.startsWith('/') && !input.startsWith('//') ? input : '';
-  const atFilter = input.startsWith('@') ? input : '';
-  const slashMenuItems = buildSlashMenuItems(skills, slashFilter, {
-    skillsDesc: t('slash.skills.desc'),
-    helpDesc: t('slash.help.desc'),
-    skillUsePrefix: t('slash.skill'),
-  });
-  const atMenuItems = buildAtMenuItems(teams, atFilter, {
-    teamsDesc: t('at.teams.desc'),
-    helpDesc: t('at.help.desc'),
-    createTeamDesc: t('at.createTeam.desc'),
-    teamUsePrefix: t('at.team'),
-  });
-
-  const commandMenuOpen = slashMenuOpen || atMenuOpen;
-  const commandMenuItems = atMenuOpen ? atMenuItems : slashMenuItems;
-
-  useEffect(() => {
-    setSlashSelected(0);
-  }, [slashFilter, atFilter]);
-
-  useEffect(() => {
-    if (input.startsWith('@')) {
-      setSlashMenuOpen(false);
-      setAtMenuOpen(atMenuItems.length > 0);
-    } else if (input.startsWith('/')) {
-      setAtMenuOpen(false);
-      setSlashMenuOpen(slashMenuItems.length > 0);
-    } else {
-      setSlashMenuOpen(false);
-      setAtMenuOpen(false);
+  const ensureCatalogForSubmit = useCallback(async () => {
+    if (skillsRef.current.length === 0) {
+      skillsRef.current = await window.koder.getSkills();
     }
-  }, [input, atMenuItems.length, slashMenuItems.length]);
-
-  useEffect(() => {
-    if (input.startsWith('@')) void reloadTeams();
-  }, [input, reloadTeams]);
+    if (teamsRef.current.length === 0) {
+      teamsRef.current = await window.koder.getTeams();
+    }
+  }, []);
 
   const loadTodos = useCallback(async () => {
     if (!session) {
@@ -419,8 +291,34 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
   }, [session, loadTodos]);
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [uiMessages]);
+    void window.koder.getAppInfo().then((info) => {
+      setModelName(info.agentModel);
+      setModelConfigured(info.agentConfigured);
+    });
+  }, [session?.id, running]);
+
+  const handleThreadScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    stickToBottomRef.current = isNearBottom(el);
+    setShowScrollBottom(!stickToBottomRef.current && uiMessages.length > 0);
+  }, [uiMessages.length]);
+
+  // 自动贴底：layout 阶段 instant 滚动，合并到每帧一次（不用 smooth）
+  useLayoutEffect(() => {
+    if (stickToBottomRef.current) {
+      stickScrollRef.current.schedule();
+    }
+  }, [uiMessages, subagentRuns, running]);
+
+  useEffect(() => () => stickScrollRef.current.cancel(), []);
+
+  const scrollToBottom = useCallback(() => {
+    stickToBottomRef.current = true;
+    const el = scrollRef.current;
+    if (el) scrollToBottomSmooth(el);
+    setShowScrollBottom(false);
+  }, []);
 
   // 自动清除 Toast
   useEffect(() => {
@@ -429,13 +327,6 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
       return () => clearTimeout(timer);
     }
   }, [toast]);
-
-  const autoResize = useCallback(() => {
-    const ta = textareaRef.current;
-    if (!ta) return;
-    ta.style.height = 'auto';
-    ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
-  }, []);
 
   const appendSystemInfo = useCallback(async (text: string) => {
     if (!session) return;
@@ -457,84 +348,90 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
     }]);
   }, [session, onAddMessage]);
 
-  const handleSlashSelect = useCallback((item: SlashMenuItem) => {
-    setInput(item.insertText);
-    setSlashMenuOpen(false);
-    setAtMenuOpen(false);
-    textareaRef.current?.focus();
-    autoResize();
-  }, [autoResize]);
+  const effectiveTeamId = session?.activeTeamId ?? settings?.defaultTeamId;
 
-  const handleToggleTodo = useCallback(async (todoId: string) => {
-    if (!session) return;
-    const next = await window.koder.toggleSessionTodo(session.id, todoId);
-    setTodos(next);
-  }, [session]);
-
-  const handleSubmit = useCallback(async () => {
-    const prompt = input.trim();
+  const handleSubmit = useCallback(async (promptOverride?: string) => {
+    const isPlanBuild = !!promptOverride && promptOverride.startsWith(PLAN_BUILD_USER_PREFIX);
+    const prompt = (promptOverride ?? '').trim();
     if (!prompt || running || !session) return;
 
+    await ensureCatalogForSubmit();
+    const teams = teamsRef.current;
+    const skills = skillsRef.current;
     const teamIds = teams.map(t => t.id);
-    const atParsed = parseAtCommand(prompt, teamIds);
     const skillIds = skills.map(s => s.id);
 
-    setInput('');
-    setSlashMenuOpen(false);
-    if (textareaRef.current) textareaRef.current.style.height = 'auto';
-
-    if (atParsed.type === 'list_teams') {
-      await appendSystemInfo(formatTeamsListLocalized(locale, teams));
-      return;
-    }
-    if (atParsed.type === 'list_help') {
-      await appendSystemInfo(formatAtHelpLocalized(locale));
-      return;
-    }
-    if (atParsed.type === 'activate_team') {
-      await window.koder.updateSession(session.id, { activeTeamId: atParsed.teamId });
-      onWorkspaceChange();
-      const team = teams.find(t => t.id === atParsed.teamId);
-      await appendSystemInfo(
-        locale === 'en'
-          ? `Agent Team **${team?.name ?? atParsed.teamId}** activated for this session.`
-          : `已为本会话激活 Agent Team：**${team?.name ?? atParsed.teamId}**（\`${atParsed.teamId}\`）`,
-      );
-      if (!atParsed.userMessage.trim()) return;
-    }
-
-    let agentPrompt = atParsed.type === 'activate_team' ? atParsed.userMessage : prompt;
-    const createTeam = atParsed.type === 'create_team';
-    if (createTeam) {
-      agentPrompt = atParsed.userMessage || (locale === 'en' ? 'Create a software dev agent team.' : '创建一个适合软件开发的多角色 Agent Team。');
-    }
-
-    const parsed = parseSlashCommand(createTeam ? '' : agentPrompt, skillIds);
-
-    if (!createTeam && parsed.type === 'list_skills') {
-      await appendSystemInfo(formatSkillsListLocalized(locale, skills));
-      return;
-    }
-    if (!createTeam && parsed.type === 'list_help') {
-      await appendSystemInfo(formatHelpLocalized(locale));
-      return;
-    }
-
-    let runPrompt = agentPrompt;
+    let runPrompt: string;
+    let displayPrompt: string;
     let activeSkillId: string | undefined;
-    if (!createTeam && parsed.type === 'invoke_skill' && parsed.skillId) {
-      activeSkillId = parsed.skillId;
-      runPrompt = parsed.userMessage || (locale === 'en' ? 'Follow the skill instructions.' : '请按照该 Skill 的指引完成任务。');
+    let createTeam = false;
+    let activeTeamId: string | undefined;
+    const interactionMode: InteractionMode = isPlanBuild ? 'agent' : agentMode;
+
+    if (isPlanBuild) {
+      runPrompt = prompt;
+      displayPrompt = t('agent.plan.buildUser');
+      activeTeamId = session.activeTeamId ?? settings?.defaultTeamId;
+    } else {
+      const atParsed = parseAtCommand(prompt, teamIds);
+
+      if (atParsed.type === 'list_teams') {
+        await appendSystemInfo(formatTeamsListLocalized(locale, teams));
+        return;
+      }
+      if (atParsed.type === 'list_help') {
+        await appendSystemInfo(formatAtHelpLocalized(locale));
+        return;
+      }
+      if (atParsed.type === 'activate_team') {
+        await window.koder.updateSession(session.id, { activeTeamId: atParsed.teamId });
+        onWorkspaceChange();
+        const team = teams.find(t => t.id === atParsed.teamId);
+        await appendSystemInfo(
+          locale === 'en'
+            ? `Agent Team **${team?.name ?? atParsed.teamId}** activated for this session.`
+            : `已为本会话激活 Agent Team：**${team?.name ?? atParsed.teamId}**（\`${atParsed.teamId}\`）`,
+        );
+        if (!atParsed.userMessage.trim()) return;
+      }
+
+      let agentPrompt = atParsed.type === 'activate_team' ? atParsed.userMessage : prompt;
+      createTeam = atParsed.type === 'create_team';
+      if (createTeam) {
+        agentPrompt = atParsed.userMessage || (locale === 'en' ? 'Create a software dev agent team.' : '创建一个适合软件开发的多角色 Agent Team。');
+      }
+
+      const parsed = parseSlashCommand(createTeam ? '' : agentPrompt, skillIds);
+
+      if (!createTeam && parsed.type === 'list_skills') {
+        await appendSystemInfo(formatSkillsListLocalized(locale, skills));
+        return;
+      }
+      if (!createTeam && parsed.type === 'list_help') {
+        await appendSystemInfo(formatHelpLocalized(locale));
+        return;
+      }
+
+      runPrompt = agentPrompt;
+      activeSkillId = undefined;
+      if (!createTeam && parsed.type === 'invoke_skill' && parsed.skillId) {
+        activeSkillId = parsed.skillId;
+        runPrompt = parsed.userMessage || (locale === 'en' ? 'Follow the skill instructions.' : '请按照该 Skill 的指引完成任务。');
+      }
+
+      activeTeamId =
+        interactionMode === 'agent'
+          ? (atParsed.type === 'activate_team'
+            ? atParsed.teamId
+            : session.activeTeamId ?? settings?.defaultTeamId)
+          : undefined;
+
+      displayPrompt = createTeam
+        ? `@create-team ${agentPrompt}`
+        : atParsed.type === 'activate_team'
+          ? `@team ${atParsed.teamId} ${agentPrompt}`.trim()
+          : prompt;
     }
-
-    const activeTeamId =
-      atParsed.type === 'activate_team' ? atParsed.teamId : session.activeTeamId;
-
-    const displayPrompt = createTeam
-      ? `@create-team ${agentPrompt}`
-      : atParsed.type === 'activate_team'
-        ? `@team ${atParsed.teamId} ${agentPrompt}`.trim()
-        : prompt;
 
     setRunning(true);
     setSubagentRuns([]);
@@ -565,6 +462,7 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
           skillId: activeSkillId,
           teamId: activeTeamId,
           createTeam,
+          interactionMode,
         },
         (e: AgentEvent) => {
           if (e.type === 'subagent_start' && e.subagent) {
@@ -689,7 +587,11 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
                   e.toolResult!.isError,
                   e.toolResult!.fileSnapshot,
                 );
-                return { ...m, ...patchFromSegments(segments) };
+                // 工具结果到达时立即关闭 thinking streaming，否则 ThinkingBlock 不展开
+                const closed = closeStreamingThinking(segments).map(s =>
+                  s.type === 'thinking' ? { ...s, streaming: false } : s,
+                );
+                return { ...m, ...patchFromSegments(closed) };
               }),
             );
             if (e.todosChanged) void loadTodos();
@@ -706,8 +608,8 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
             );
             setRunning(false);
           } else if (e.type === 'done') {
-            setUiMessages((prev) =>
-              prev.map((m) => {
+            setUiMessages((prev) => {
+              const updated = prev.map((m) => {
                 if (m.id !== assistantMsgId) return m;
                 const closed = closeStreamingThinking(m.segments);
                 return {
@@ -715,13 +617,24 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
                   ...patchFromSegments(closed),
                   streaming: false,
                 };
-              }),
-            );
+              });
+              if (agentModeRef.current === 'plan') {
+                const msg = updated.find((m) => m.id === assistantMsgId);
+                if (msg) {
+                  const planText = extractAssistantText(msg);
+                  if (planText) {
+                    setPendingPlan(planText);
+                    // plan:saved 事件由主进程写入 ~/.koder/plan/ 后触发并打开弹窗
+                  }
+                }
+              }
+              return updated;
+            });
             setRunning(false);
           } else if (e.type === 'context_usage' && e.usage) {
             setContextUsage((prev) => ({
               current: e.usage!.totalTokens,
-              max: e.usage!.maxContextTokens ?? prev.max,
+              max: e.usage!.maxContextTokens ?? maxContextRef.current,
               breakdown: e.usage!.breakdown,
               cachedTokens: e.usage!.cachedTokens,
               cacheHitRate: e.usage!.cacheHitRate,
@@ -743,45 +656,17 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
       );
       setRunning(false);
     }
-  }, [input, running, session, onAddMessage, skills, appendSystemInfo]);
+  }, [running, session, onAddMessage, locale, appendSystemInfo, settings?.defaultTeamId, agentMode, onWorkspaceChange, t, ensureCatalogForSubmit]);
 
-  // streaming 结束后持久化 assistant 消息
-  // 注意：主进程的 agent:run .then() 会自动保存消息 + 快照，
-  // 这里只做 session 刷新（如果主进程已保存则跳过，避免重复）
-  useEffect(() => {
-    if (!running && uiMessages.length > 0) {
-      const lastMsg = uiMessages[uiMessages.length - 1];
-      if (lastMsg.role === 'assistant' && lastMsg.text && !lastMsg.streaming) {
-        // 刷新 session（但不要重复 addMessage，由主进程负责）
-        (async () => {
-          if (session) {
-            const updated = await window.koder.getSession(session.id);
-            if (updated) {
-              const msgExists = updated.messages.some((m) => m.id === lastMsg.id);
-              if (!msgExists) {
-                // 主进程还没保存，我们帮它保存
-                const thinkingText = lastMsg.thinkingSegments.map(s => s.content).join('\n\n');
-                await onAddMessage({
-                  id: lastMsg.id,
-                  role: 'assistant',
-                  text: lastMsg.text,
-                  timestamp: lastMsg.timestamp,
-                  thinking: thinkingText || undefined,
-                  toolCalls: lastMsg.toolCalls.length > 0
-                    ? lastMsg.toolCalls.map((tc) => ({
-                        id: tc.id, name: tc.name, input: tc.input, output: tc.output, status: tc.status,
-                        fileSnapshot: tc.fileSnapshot,
-                      }))
-                    : undefined,
-                  segments: lastMsg.segments.length > 0 ? segmentsToPersisted(lastMsg.segments) : undefined,
-                });
-              }
-            }
-          }
-        })();
-      }
-    }
-  }, [running, uiMessages]); // eslint-disable-line react-hooks/exhaustive-deps
+  const handleBuildPlan = useCallback(() => {
+    if (!pendingPlan) return;
+    const plan = pendingPlan;
+    setPendingPlan(null);
+    setAgentMode('agent');
+    void handleSubmit(PLAN_BUILD_USER_PREFIX + plan);
+  }, [pendingPlan, handleSubmit]);
+
+  // 主进程的 agent:run .then() 负责保存 assistant 消息，此处不做重复保存
 
   useEffect(() => {
     return () => { if (unsubscribe) unsubscribe(); };
@@ -806,8 +691,6 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
 
   const handleRollback = useCallback(async (assistantMsgIndex: number) => {
     if (!session || running) return;
-    // 先关闭确认弹窗
-    setPendingRollback(null);
     const result = await window.koder.rollback(session.id, assistantMsgIndex);
     if (result.ok) {
       setUiMessages((prev) => prev.slice(0, assistantMsgIndex));
@@ -826,295 +709,166 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
     setPendingRollback(assistantMsgIndex);
   }, []);
 
-  const cancelRollback = useCallback(() => {
-    setPendingRollback(null);
-  }, []);
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (commandMenuOpen && commandMenuItems.length > 0) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        setSlashSelected(i => (i + 1) % commandMenuItems.length);
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setSlashSelected(i => (i - 1 + commandMenuItems.length) % commandMenuItems.length);
-        return;
-      }
-      if (e.key === 'Tab' || (e.key === 'Enter' && !e.ctrlKey && !e.metaKey)) {
-        e.preventDefault();
-        handleSlashSelect(commandMenuItems[slashSelected]);
-        return;
-      }
-      if (e.key === 'Escape') {
-        setSlashMenuOpen(false);
-        setAtMenuOpen(false);
-        return;
-      }
-    }
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      void handleSubmit();
-    }
-  };
+  const contextPercent = contextUsage.max > 0
+    ? (contextUsage.current / contextUsage.max) * 100
+    : 0;
+  const sessionTitle = session?.title?.trim()
+    || (session?.cwd ? session.cwd.split(/[\\/]/).pop() : undefined);
 
   return (
-    <div className="chat">
-      <div className="chat-scroll" ref={scrollRef}>
-        {uiMessages.length === 0 ? (
-          <div className="chat-empty">
-            <div className="chat-empty-icon"><IconChat /></div>
-            <h2>{t('chat.empty.title')}</h2>
-            <p>{t('chat.empty.desc')}</p>
-          </div>
-        ) : (
-          uiMessages.map((m, msgIndex) => {
-            if (m.role === 'system') {
-              return (
-                <div key={m.id} className="msg-system-row">
-                  <div className="msg-system-inner">{renderMarkdown(m.text)}</div>
-                </div>
-              );
-            }
-            const cleanText = parseMessageContent(m.text, m.toolCalls);
-            const thinkingCount = m.segments.filter(s => s.type === 'thinking').length;
-            return (
-              <div key={m.id} className="msg-row">
-                <div className="msg-row-inner">
-                  <div className={`msg-avatar msg-avatar-${m.role}`}>
-                    {m.role === 'user' ? t('chat.you').charAt(0) : 'K'}
-                  </div>
-                  <div className="msg-body">
-                    <div className="msg-role-label">{m.role === 'user' ? t('chat.you') : t('chat.assistant')}</div>
-                    <div className="msg-content">
-                      {m.role === 'assistant' ? (
-                        <>
-                          {m.segments.map((seg, segIndex) => {
-                            if (seg.type === 'thinking') {
-                              const thinkIndex = m.segments
-                                .slice(0, segIndex + 1)
-                                .filter(s => s.type === 'thinking').length;
-                              const label = seg.streaming
-                                ? t('chat.thinking')
-                                : thinkingCount > 1
-                                  ? t('chat.thinkingProcessN', { n: thinkIndex })
-                                  : t('chat.thinkingProcess');
-                              return (
-                                <ThinkingBlock
-                                  key={seg.id}
-                                  content={seg.content}
-                                  streaming={seg.streaming}
-                                  label={label}
-                                />
-                              );
-                            }
-                            if (seg.type === 'tool_call') {
-                              return <ToolCallCard key={seg.id} toolCall={seg.toolCall} />;
-                            }
-                            if (seg.type === 'text' && seg.content) {
-                              return (
-                                <div key={seg.id} className="msg-text-segment">
-                                  {renderMarkdown(parseMessageContent(seg.content, m.toolCalls))}
-                                </div>
-                              );
-                            }
-                            return null;
-                          })}
-                          {/* 无 segments 时的兜底 */}
-                          {m.segments.length === 0 && cleanText && renderMarkdown(cleanText)}
-                          {m.streaming && <span className="streaming-cursor" />}
-                        </>
-                      ) : (
-                        <p>{m.text}</p>
-                      )}
-                    </div>
-                    {/* 回退按钮：仅在非流式 assistant 消息上显示 */}
-                    {m.role === 'assistant' && !m.streaming && !running && msgIndex > 0 && (
-                      <button
-                        className="msg-rollback-btn"
-                        onClick={() => confirmRollback(msgIndex > 0 ? msgIndex - 1 : msgIndex)}
-                        title={t('chat.rollback.warn')}
-                      >
-                        <IconRollback /> {t('chat.rollback')}
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          })
+    <div className="agent-panel">
+      <ChatHeader
+        title={sessionTitle}
+        modelName={modelName}
+        configured={modelConfigured}
+        mode={agentMode}
+        onModeChange={setAgentMode}
+        contextPercent={contextPercent}
+        hasContextUsage={contextUsage.current > 0}
+        showContextDetail={showContextDetail}
+        onToggleContext={() => setShowContextDetail(prev => !prev)}
+        running={running}
+      />
+
+      <div className="agent-thread-wrap">
+        <div className="agent-thread" ref={scrollRef} onScroll={handleThreadScroll}>
+          <ChatMessageList
+            messages={uiMessages}
+            running={running}
+            hydrating={messagesHydrating}
+            emptyTitle={t('chat.empty.title')}
+            emptyDesc={t('chat.empty.desc')}
+            modeAgentLabel={t('agent.mode.agent')}
+            modePlanLabel={t('agent.mode.plan')}
+            planningLabel={t('agent.planning')}
+            thoughtLabel={t('agent.thought')}
+            thoughtNLabel={(n) => `${t('agent.thought')} ${n}`}
+            rollbackLabel={t('chat.rollback')}
+            rollbackTitle={t('chat.rollback.warn')}
+            onRollback={confirmRollback}
+          />
+        </div>
+
+        {showScrollBottom && (
+          <button type="button" className="agent-scroll-bottom" onClick={scrollToBottom}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+            {t('agent.scrollBottom')}
+          </button>
         )}
       </div>
 
-      <div className="composer">
-        <div className="composer-inner">
-          <div className="composer-toolbar">
-            <button
-              className="workspace-btn"
-              onClick={handleSelectWorkspace}
-              disabled={running || !session}
-              title={t('chat.workspace.select')}
-            >
-              <IconFolder />
-              <span className="workspace-label">
-                {session?.cwd ? session.cwd.split(/[\\/]/).pop() : t('chat.workspace.pick')}
-              </span>
-            </button>
-            {session?.cwd && (
-              <span className="workspace-path" title={session.cwd}>{session.cwd}</span>
-            )}
-            {session?.activeTeamId && (
-              <span className="active-team-badge" title={session.activeTeamId}>
-                Team: {session.activeTeamId}
-              </span>
-            )}
-          </div>
-          <SubAgentPanel runs={subagentRuns} />
-          {/* 上下文占用指示器 */}
-          {contextUsage.current > 0 && (
-            <div className="context-usage-section">
-              <div
-                className="context-usage-bar"
-                onClick={() => setShowContextDetail(prev => !prev)}
-                title={showContextDetail ? t('chat.context.collapse') : t('chat.context.detail')}
-              >
-                <div
-                  className="context-usage-fill"
-                  style={{ width: `${Math.min((contextUsage.current / contextUsage.max) * 100, 100)}%` }}
-                />
-                <span className="context-usage-text">
-                  {Math.min((contextUsage.current / contextUsage.max) * 100, 100).toFixed(1)}% · {(contextUsage.current / 1000).toFixed(0)}K / {(contextUsage.max / 1000).toFixed(0)}K
-                  {contextUsage.cacheHitRate != null && contextUsage.cacheHitRate > 0 && (
-                    <> · {t('chat.context.cacheSuffix')} {contextUsage.cacheHitRate.toFixed(0)}%</>
-                  )}
-                </span>
-              </div>
-              {showContextDetail && contextUsage.breakdown && (
-                <div className="context-usage-detail">
-                  {(contextUsage.cachedTokens != null && contextUsage.cachedTokens > 0) && (
-                    <div className="context-detail-row context-detail-cache">
-                      <span>{t('chat.context.apiCache')}</span>
-                      <span className="context-detail-cache-val">
-                        {(contextUsage.cachedTokens / 1000).toFixed(1)}K tokens · {t('chat.context.cacheHit')} {contextUsage.cacheHitRate?.toFixed(1) ?? 0}%
-                      </span>
-                    </div>
-                  )}
-                  {(contextUsage.toolCacheHits != null || contextUsage.toolCacheMisses != null) && (
-                    <div className="context-detail-row context-detail-cache">
-                      <span>{t('chat.context.toolCache')}</span>
-                      <span className="context-detail-cache-val">
-                        {t('chat.context.hits')} {contextUsage.toolCacheHits ?? 0} · {t('chat.context.misses')} {contextUsage.toolCacheMisses ?? 0}
-                      </span>
-                    </div>
-                  )}
-                  <div className="context-detail-row">
-                    <span>{t('chat.context.system')}</span>
-                    <span className="context-detail-bar-wrap">
-                      <span className="context-detail-bar" style={{ width: `${(contextUsage.breakdown.system / contextUsage.max) * 100}%` }} />
-                    </span>
-                    <span className="context-detail-num">{(contextUsage.breakdown.system / 1000).toFixed(1)}K</span>
-                  </div>
-                  <div className="context-detail-row">
-                    <span>{t('chat.context.history')}</span>
-                    <span className="context-detail-bar-wrap">
-                      <span className="context-detail-bar" style={{ width: `${(contextUsage.breakdown.history / contextUsage.max) * 100}%` }} />
-                    </span>
-                    <span className="context-detail-num">{(contextUsage.breakdown.history / 1000).toFixed(1)}K</span>
-                  </div>
-                  <div className="context-detail-row">
-                    <span>{t('chat.context.toolDefs')}</span>
-                    <span className="context-detail-bar-wrap">
-                      <span className="context-detail-bar" style={{ width: `${(contextUsage.breakdown.toolDefs / contextUsage.max) * 100}%` }} />
-                    </span>
-                    <span className="context-detail-num">{(contextUsage.breakdown.toolDefs / 1000).toFixed(1)}K</span>
-                  </div>
-                  <div className="context-detail-row">
-                    <span>{t('chat.context.toolResults')}</span>
-                    <span className="context-detail-bar-wrap">
-                      <span className="context-detail-bar" style={{ width: `${(contextUsage.breakdown.toolResults / contextUsage.max) * 100}%` }} />
-                    </span>
-                    <span className="context-detail-num">{(contextUsage.breakdown.toolResults / 1000).toFixed(1)}K</span>
-                  </div>
-                  <div className="context-detail-row">
-                    <span>{t('chat.context.output')}</span>
-                    <span className="context-detail-bar-wrap">
-                      <span className="context-detail-bar" style={{ width: `${(contextUsage.breakdown.currentOutput / contextUsage.max) * 100}%` }} />
-                    </span>
-                    <span className="context-detail-num">{(contextUsage.breakdown.currentOutput / 1000).toFixed(1)}K</span>
-                  </div>
+      <div className="agent-composer">
+        <div className="agent-composer-inner">
+          {showContextDetail && contextUsage.breakdown && (
+            <div className="context-usage-detail agent-context-detail">
+              {(contextUsage.cachedTokens != null && contextUsage.cachedTokens > 0) && (
+                <div className="context-detail-row context-detail-cache">
+                  <span>{t('chat.context.apiCache')}</span>
+                  <span className="context-detail-cache-val">
+                    {formatTokenCount(contextUsage.cachedTokens)} tokens · {t('chat.context.cacheHit')} {contextUsage.cacheHitRate?.toFixed(1) ?? 0}%
+                  </span>
                 </div>
               )}
+              {(contextUsage.toolCacheHits != null || contextUsage.toolCacheMisses != null) && (
+                <div className="context-detail-row context-detail-cache">
+                  <span>{t('chat.context.toolCache')}</span>
+                  <span className="context-detail-cache-val">
+                    {t('chat.context.hits')} {contextUsage.toolCacheHits ?? 0} · {t('chat.context.misses')} {contextUsage.toolCacheMisses ?? 0}
+                  </span>
+                </div>
+              )}
+              <div className="context-detail-row">
+                <span>{t('chat.context.system')}</span>
+                <span className="context-detail-bar-wrap">
+                  <span className="context-detail-bar" style={{ width: `${(contextUsage.breakdown.system / contextUsage.max) * 100}%` }} />
+                </span>
+                <span className="context-detail-num">{formatTokenCount(contextUsage.breakdown.system)}</span>
+              </div>
+              <div className="context-detail-row">
+                <span>{t('chat.context.history')}</span>
+                <span className="context-detail-bar-wrap">
+                  <span className="context-detail-bar" style={{ width: `${(contextUsage.breakdown.history / contextUsage.max) * 100}%` }} />
+                </span>
+                <span className="context-detail-num">{formatTokenCount(contextUsage.breakdown.history)}</span>
+              </div>
+              <div className="context-detail-row">
+                <span>{t('chat.context.toolDefs')}</span>
+                <span className="context-detail-bar-wrap">
+                  <span className="context-detail-bar" style={{ width: `${(contextUsage.breakdown.toolDefs / contextUsage.max) * 100}%` }} />
+                </span>
+                <span className="context-detail-num">{formatTokenCount(contextUsage.breakdown.toolDefs)}</span>
+              </div>
+              <div className="context-detail-row">
+                <span>{t('chat.context.toolResults')}</span>
+                <span className="context-detail-bar-wrap">
+                  <span className="context-detail-bar" style={{ width: `${(contextUsage.breakdown.toolResults / contextUsage.max) * 100}%` }} />
+                </span>
+                <span className="context-detail-num">{formatTokenCount(contextUsage.breakdown.toolResults)}</span>
+              </div>
+              <div className="context-detail-row">
+                <span>{t('chat.context.output')}</span>
+                <span className="context-detail-bar-wrap">
+                  <span className="context-detail-bar" style={{ width: `${(contextUsage.breakdown.currentOutput / contextUsage.max) * 100}%` }} />
+                </span>
+                <span className="context-detail-num">{formatTokenCount(contextUsage.breakdown.currentOutput)}</span>
+              </div>
             </div>
           )}
-          <TodoPanel
-            todos={todos}
-            sessionId={session?.id ?? null}
-            onToggle={(id) => { void handleToggleTodo(id); }}
-            collapsed={todoPanelCollapsed}
-            onToggleCollapse={() => setTodoPanelCollapsed(c => !c)}
+
+          {subagentRuns.length > 0 && <SubAgentPanel runs={subagentRuns} />}
+          {todos.length > 0 && (
+            <TodoPanel
+              todos={todos}
+              collapsed={todoPanelCollapsed}
+              onToggleCollapse={() => setTodoPanelCollapsed(c => !c)}
+            />
+          )}
+
+          {pendingPlan && agentMode === 'plan' && !running && (
+            <PlanPanel
+              planMarkdown={pendingPlan}
+              filePath={pendingPlanPath ?? undefined}
+              onBuild={handleBuildPlan}
+              onDismiss={() => {
+                setPendingPlan(null);
+                setPendingPlanPath(null);
+              }}
+              onView={() => setPlanModalOpen(true)}
+            />
+          )}
+
+          {planModalOpen && pendingPlan && (
+            <PlanModal
+              markdown={pendingPlan}
+              filePath={pendingPlanPath ?? undefined}
+              onBuild={handleBuildPlan}
+              onDismiss={() => setPlanModalOpen(false)}
+            />
+          )}
+
+          <ChatComposer
+            session={session}
+            running={running}
+            agentMode={agentMode}
+            effectiveTeamId={effectiveTeamId}
+            onSubmit={(text) => { void handleSubmit(text); }}
+            onStop={handleCancel}
+            onSelectWorkspace={handleSelectWorkspace}
+            onSlashSelect={() => {}}
           />
-          <div className="composer-input-wrap">
-            <SlashCommandMenu
-              items={commandMenuItems}
-              selectedIndex={slashSelected}
-              onSelect={handleSlashSelect}
-              visible={commandMenuOpen}
-              kindLabels={{ cmd: t('slash.cmd'), skill: t('slash.skill'), team: t('at.team') }}
-            />
-            <textarea
-              ref={textareaRef}
-              className="composer-textarea"
-              rows={1}
-              value={input}
-              onChange={(e) => { setInput(e.target.value); autoResize(); }}
-              onKeyDown={handleKeyDown}
-              placeholder={t('chat.placeholder')}
-            />
-          </div>
-          <div className="composer-actions">
-            <span className="composer-hint">{t('chat.hint')}</span>
-            <div className="composer-buttons">
-              {running ? (
-                <button className="btn btn-danger" onClick={handleCancel}>
-                  <IconStop /> {t('chat.stop')}
-                </button>
-              ) : (
-                <button className="btn btn-primary" onClick={handleSubmit} disabled={!input.trim() || !session}>
-                  <IconSend /> {t('chat.send')}
-                </button>
-              )}
-            </div>
-          </div>
         </div>
       </div>
 
       {/* 回退确认弹窗 */}
       {pendingRollback !== null && (
-        <div className="modal-overlay" onClick={cancelRollback}>
-          <div className="modal" style={{ maxWidth: 400 }}>
-            <div className="modal-header">
-              <h2>{t('chat.rollback.title')}</h2>
-              <button className="icon-btn" onClick={cancelRollback}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: 18, height: 18 }}>
-                  <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-              </button>
-            </div>
-            <div className="modal-body">
-              <p>{t('chat.rollback.body1')}</p>
-              <ul>
-                <li>{t('chat.rollback.li1')}</li>
-                <li>{t('chat.rollback.li2')}</li>
-              </ul>
-              <p style={{ color: 'var(--danger)', fontWeight: 500 }}>{t('chat.rollback.warn')}</p>
-            </div>
-            <div className="modal-footer">
-              <button className="btn btn-ghost" onClick={cancelRollback}>{t('chat.cancel')}</button>
-              <button className="btn btn-danger" onClick={() => handleRollback(pendingRollback)}>{t('chat.confirmRollback')}</button>
-            </div>
-          </div>
-        </div>
+        <Modal onClose={() => setPendingRollback(null)} panelClassName="modal-sm">
+          <RollbackConfirmDialog
+            index={pendingRollback}
+            onConfirm={handleRollback}
+          />
+        </Modal>
       )}
 
       {/* Toast 通知 */}
@@ -1124,5 +878,50 @@ export default function Chat({ session, onAddMessage, onOpenFileBrowser, onWorks
         </div>
       )}
     </div>
+  );
+}
+
+function RollbackConfirmDialog({
+  index,
+  onConfirm,
+}: {
+  index: number;
+  onConfirm: (assistantMsgIndex: number) => void | Promise<void>;
+}) {
+  const { t } = useI18n();
+  const requestClose = useModalClose();
+
+  return (
+    <>
+      <div className="modal-header">
+        <h2>{t('chat.rollback.title')}</h2>
+        <button type="button" className="icon-btn" onClick={requestClose}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: 18, height: 18 }}>
+            <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+      </div>
+      <div className="modal-body">
+        <p>{t('chat.rollback.body1')}</p>
+        <ul>
+          <li>{t('chat.rollback.li1')}</li>
+          <li>{t('chat.rollback.li2')}</li>
+        </ul>
+        <p style={{ color: 'var(--danger)', fontWeight: 500 }}>{t('chat.rollback.warn')}</p>
+      </div>
+      <div className="modal-footer">
+        <button type="button" className="btn btn-ghost" onClick={requestClose}>{t('chat.cancel')}</button>
+        <button
+          type="button"
+          className="btn btn-danger"
+          onClick={() => {
+            requestClose();
+            void onConfirm(index);
+          }}
+        >
+          {t('chat.confirmRollback')}
+        </button>
+      </div>
+    </>
   );
 }

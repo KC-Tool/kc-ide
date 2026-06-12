@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { SkillHubRemoteSkill, SkillListItem } from '../../shared/ipc';
 import { parseSkillHubSlug, skillHubSkillUrl } from '../../shared/skillhub-types';
 import { useI18n } from '../contexts/I18nContext';
+import Modal, { useModalClose } from './Modal';
 
 interface Props {
   onClose: () => void;
@@ -15,7 +16,16 @@ const IconX = () => (
   </svg>
 );
 
-export default function SkillsStore({ onClose }: Props) {
+export default function SkillsStore(props: Props) {
+  return (
+    <Modal onClose={props.onClose} panelClassName="modal-lg skills-store-modal">
+      <SkillsStoreContent />
+    </Modal>
+  );
+}
+
+function SkillsStoreContent() {
+  const requestClose = useModalClose();
   const { t } = useI18n();
 
   const [localSkills, setLocalSkills] = useState<SkillListItem[]>([]);
@@ -150,16 +160,11 @@ export default function SkillsStore({ onClose }: Props) {
     return t('skills.source.user');
   };
 
-  const handleOverlayClick = (e: React.MouseEvent) => {
-    if (e.target === e.currentTarget) onClose();
-  };
-
   return (
-    <div className="modal-overlay" onClick={handleOverlayClick}>
-      <div className="modal modal-lg skills-store-modal">
+    <>
         <div className="modal-header">
           <h2>{t('skills.title')}</h2>
-          <button type="button" className="icon-btn" onClick={onClose} aria-label={t('common.close')}>
+          <button type="button" className="icon-btn" onClick={requestClose} aria-label={t('common.close')}>
             <IconX />
           </button>
         </div>
@@ -327,7 +332,7 @@ export default function SkillsStore({ onClose }: Props) {
           <button type="button" className="btn btn-ghost" onClick={() => void loadLocal()}>
             {t('skills.reload')}
           </button>
-          <button type="button" className="btn btn-primary" onClick={onClose}>
+          <button type="button" className="btn btn-primary" onClick={requestClose}>
             {t('common.close')}
           </button>
         </div>
@@ -337,8 +342,7 @@ export default function SkillsStore({ onClose }: Props) {
             {toast.message}
           </div>
         )}
-      </div>
-    </div>
+    </>
   );
 }
 

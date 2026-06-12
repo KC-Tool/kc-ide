@@ -1,5 +1,6 @@
 // Koder Agent 引擎
 // 负责：调用 OpenAI-compatible API（streaming），执行 tool calls，多轮对话
+// 集成优化策略：上下文增强、推理增强、指令优化、约束管理、反馈机制、缓存策略
 
 import https from 'node:https';
 import http from 'node:http';
@@ -14,6 +15,7 @@ import {
   extractPromptTokens,
 } from './prompt-cache.js';
 import { globalToolCache } from './tool-cache.js';
+import { EnhancementManager, type EnhancementManagerConfig } from './enhancement/enhancement-manager.js';
 
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -36,6 +38,36 @@ interface RunningAgent {
 
 export class AgentEngine {
   private agents = new Map<string, RunningAgent>();
+  private enhancementManager: EnhancementManager | null = null;
+  private enhancementInitialized = false;
+
+  constructor() {
+    // 初始化增强管理器
+    this.initializeEnhancementManager();
+  }
+
+  private async initializeEnhancementManager(): Promise<void> {
+    try {
+      const config = EnhancementManager.getDefaultConfig();
+      this.enhancementManager = new EnhancementManager(config);
+      this.enhancementInitialized = true;
+    } catch (error) {
+      console.error('Failed to initialize EnhancementManager:', error);
+      this.enhancementManager = null;
+      this.enhancementInitialized = false;
+    }
+  }
+
+  async initializeEnhancementForProject(rootPath: string): Promise<void> {
+    if (this.enhancementManager && !this.enhancementInitialized) {
+      try {
+        await this.enhancementManager.initialize(rootPath);
+        this.enhancementInitialized = true;
+      } catch (error) {
+        console.error('Failed to initialize enhancement for project:', error);
+      }
+    }
+  }
 
   async run(
     config: AgentConfig,
@@ -46,12 +78,21 @@ export class AgentEngine {
     options: AgentRunOptions = {},
   ): Promise<void> {
     const tools = options.tools ?? TOOL_DEFINITIONS;
-    const maxIterations = options.maxIterations ?? 20;
+    const maxIterations = options.maxIterations ?? 50;
 
     if (!options.skipResetWrittenFiles) {
       resetWrittenFileTracking();
     }
     configureToolCache(config);
+
+    // 初始化项目增强
+    await this.initializeEnhancementForProject(cwd);
+
+    // 增强系统提示词
+    let enhancedSystemPrompt = config.systemPrompt;
+    if (this.enhancementManager) {
+      enhancedSystemPrompt = this.enhancementManager.generateEnhancedSystemPrompt(config.systemPrompt);
+    }
 
     // 累加器：跨迭代累积上下文总消耗
     let accumulatedTotalTokens = 0;
@@ -67,7 +108,15 @@ export class AgentEngine {
       tool_call_id: m.tool_call_id,
     }));
 
+    // 使用增强的系统提示词
+    if (messages.length > 0 && messages[0].role === 'system') {
+      messages[0].content = enhancedSystemPrompt;
+    } else {
+      messages.unshift({ role: 'system', content: enhancedSystemPrompt });
+    }
+
     const MAX_ITERATIONS = maxIterations;
+    let completed = false;
 
     for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
       if (handle.cancelled) {
@@ -120,16 +169,55 @@ export class AgentEngine {
           },
         });
 
-        if (result.toolCalls.length === 0) {
+        if (result.finishReason === 'length') {
+          eventCb({
+            type: 'error',
+            data: `Output truncated (token limit ${config.maxTokens}). Increase **Max tokens** in Settings → Model, or ask for smaller changes.`,
+            ts: Date.now(),
+          });
+        }
+
+        const toolCalls = result.toolCalls.filter((tc) => tc.name?.trim());
+
+        if (toolCalls.length === 0) {
+          if (result.finishReason === 'length' && result.thinkingContent && !result.textContent) {
+            eventCb({
+              type: 'error',
+              data: 'Thinking used the entire token budget with no visible reply. Increase max tokens or lower reasoning effort.',
+              ts: Date.now(),
+            });
+          }
           eventCb({ type: 'done', ts: Date.now() });
+          completed = true;
           break;
+        }
+
+        if (result.finishReason === 'length') {
+          const truncated = toolCalls.some((tc) => {
+            try {
+              JSON.parse(tc.arguments);
+              return false;
+            } catch {
+              return tc.arguments.length > 0;
+            }
+          });
+          if (truncated) {
+            eventCb({
+              type: 'error',
+              data: 'Tool call arguments were truncated by max_tokens. Increase max tokens in Settings → Model.',
+              ts: Date.now(),
+            });
+            eventCb({ type: 'done', ts: Date.now() });
+            completed = true;
+            break;
+          }
         }
 
         // 添加 assistant 消息（含 tool_calls 和思考内容）
         const assistantMsg: ChatMessage = {
           role: 'assistant',
           content: result.textContent || undefined,
-          tool_calls: result.toolCalls.map((tc) => ({
+          tool_calls: toolCalls.map((tc) => ({
             id: tc.id,
             type: 'function' as const,
             function: { name: tc.name, arguments: tc.arguments },
@@ -142,7 +230,7 @@ export class AgentEngine {
         messages.push(assistantMsg);
 
         // 执行每个 tool call
-        for (const tc of result.toolCalls) {
+        for (const tc of toolCalls) {
           if (handle.cancelled) break;
 
           // 归一化工具名（部分模型会发送非标准名称）
@@ -171,13 +259,24 @@ export class AgentEngine {
 
         if (handle.cancelled) {
           eventCb({ type: 'done', ts: Date.now() });
+          completed = true;
           break;
         }
       } catch (err) {
         eventCb({ type: 'error', data: (err as Error).message, ts: Date.now() });
         eventCb({ type: 'done', ts: Date.now() });
+        completed = true;
         break;
       }
+    }
+
+    if (!completed && !handle.cancelled) {
+      eventCb({
+        type: 'error',
+        data: `Agent stopped after ${maxIterations} tool rounds without finishing. The task may be too complex or the agent may be stuck. Try: 1) Breaking the task into smaller steps, 2) Providing more specific instructions, 3) Increasing max iterations in settings, or 4) Starting a new conversation with a clearer goal.`,
+        ts: Date.now(),
+      });
+      eventCb({ type: 'done', ts: Date.now() });
     }
 
     this.agents.delete(sessionId);
@@ -216,6 +315,7 @@ export class AgentEngine {
     promptTokens: number;
     toolCacheHits: number;
     toolCacheMisses: number;
+    finishReason: string | null;
   }> {
     return new Promise((resolve, reject) => {
       const baseUrl = config.baseUrl.replace(/\/+$/, '');
@@ -253,6 +353,7 @@ export class AgentEngine {
       let buffer = '';
       let cachedTokens = 0;
       let promptTokens = 0;
+      let finishReason: string | null = null;
 
       const req = transport.request(options, (res) => {
         if (res.statusCode && res.statusCode >= 400) {
@@ -293,6 +394,8 @@ export class AgentEngine {
               }
 
               const delta = parsed.choices?.[0]?.delta;
+              const choiceFinish = parsed.choices?.[0]?.finish_reason;
+              if (choiceFinish) finishReason = choiceFinish;
               if (!delta) continue;
 
               // 文本增量
@@ -359,6 +462,7 @@ export class AgentEngine {
             promptTokens,
             toolCacheHits: toolStats.hits,
             toolCacheMisses: toolStats.misses,
+            finishReason,
           });
         });
       });

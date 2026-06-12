@@ -2,9 +2,16 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentConfig, AppSettings } from '../../shared/ipc';
 import { LOCALE_LABELS } from '../../shared/i18n';
 import type { Locale } from '../../shared/ipc';
+import { DEFAULT_SYSTEM_PROMPT } from '../../shared/system-prompt';
 import { useI18n } from '../contexts/I18nContext';
 import { useTheme } from '../contexts/ThemeContext';
+import {
+  DYNAMIC_BLUR_LEVEL_KEYS,
+  DYNAMIC_BLUR_LEVEL_MAX,
+  clampDynamicBlurLevel,
+} from '../../shared/visual-effects';
 import TeamsSettingsPanel from './TeamsSettingsPanel';
+import Modal, { useModalClose } from './Modal';
 
 export type SettingsTab = 'general' | 'model' | 'teams';
 
@@ -22,7 +29,16 @@ const IconX = () => (
   </svg>
 );
 
-export default function SettingsHub({ initialTab, onClose, onModelSaved }: Props) {
+export default function SettingsHub(props: Props) {
+  return (
+    <Modal onClose={props.onClose} panelClassName="modal-lg settings-hub">
+      <SettingsHubContent {...props} />
+    </Modal>
+  );
+}
+
+function SettingsHubContent({ initialTab, onModelSaved }: Props) {
+  const requestClose = useModalClose();
   const { t, locale, setLocale, refreshSettings: refreshI18n } = useI18n();
   const { settings, updateSettings, refreshSettings: refreshTheme } = useTheme();
 
@@ -48,10 +64,10 @@ export default function SettingsHub({ initialTab, onClose, onModelSaved }: Props
   }, [settings]);
 
   useEffect(() => {
-    if (tab === 'model' && !config) {
+    if (!config) {
       void window.koder.getAgentConfig().then(setConfig);
     }
-  }, [tab, config]);
+  }, [config]);
 
   const switchTab = useCallback((next: SettingsTab) => {
     const nextIdx = TAB_ORDER.indexOf(next);
@@ -69,6 +85,8 @@ export default function SettingsHub({ initialTab, onClose, onModelSaved }: Props
       fontSize: generalDraft.fontSize,
       locale: generalDraft.locale,
       defaultTeamId: generalDraft.defaultTeamId,
+      dynamicBlurLevel: generalDraft.dynamicBlurLevel,
+      liquidGlassEnabled: generalDraft.liquidGlassEnabled,
     });
     if (generalDraft.locale !== locale) {
       await setLocale(generalDraft.locale);
@@ -76,26 +94,52 @@ export default function SettingsHub({ initialTab, onClose, onModelSaved }: Props
     await refreshI18n();
     await refreshTheme();
     setGeneralSaving(false);
-    onClose();
-  }, [generalDraft, updateSettings, locale, setLocale, refreshI18n, refreshTheme, onClose]);
+    requestClose();
+  }, [generalDraft, updateSettings, locale, setLocale, refreshI18n, refreshTheme, requestClose]);
 
   const handleSaveModel = useCallback(async () => {
     if (!config) return;
     setModelSaving(true);
-    await window.koder.updateAgentConfig(config);
+    const customized = config.systemPrompt.trim() !== DEFAULT_SYSTEM_PROMPT.trim();
+    await window.koder.updateAgentConfig({
+      ...config,
+      systemPromptCustomized: customized,
+    });
     setModelSaving(false);
     onModelSaved?.();
-    onClose();
-  }, [config, onClose, onModelSaved]);
+    requestClose();
+  }, [config, onModelSaved, requestClose]);
 
-  const handleOverlayClick = (e: React.MouseEvent) => {
-    if (e.target === e.currentTarget) onClose();
-  };
+  const handleResetSystemPrompt = useCallback(() => {
+    if (!config) return;
+    setConfig({
+      ...config,
+      systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      systemPromptCustomized: false,
+    });
+  }, [config]);
 
   const handleDefaultTeamChange = useCallback((id: string | undefined) => {
     setGeneralDraft((d) => (d ? { ...d, defaultTeamId: id } : d));
     void updateSettings({ defaultTeamId: id });
   }, [updateSettings]);
+
+  const handleDynamicBlurChange = useCallback((level: number) => {
+    const next = clampDynamicBlurLevel(level);
+    setGeneralDraft((d) => (d ? { ...d, dynamicBlurLevel: next } : d));
+    void updateSettings({ dynamicBlurLevel: next });
+  }, [updateSettings]);
+
+  const handleLiquidGlassChange = useCallback((enabled: boolean) => {
+    setGeneralDraft((d) => (d ? { ...d, liquidGlassEnabled: enabled } : d));
+    void updateSettings({ liquidGlassEnabled: enabled });
+  }, [updateSettings]);
+
+  const handleFrameRateChange = useCallback((fps: number) => {
+    const next = Math.min(240, Math.max(1, Math.round(fps) || 60));
+    setConfig((c) => (c ? { ...c, appFrameRate: next } : c));
+    void window.koder.updateAgentConfig({ appFrameRate: next });
+  }, []);
 
   const tabs: { id: SettingsTab; label: string }[] = [
     { id: 'general', label: t('settings.tab.general') },
@@ -104,11 +148,10 @@ export default function SettingsHub({ initialTab, onClose, onModelSaved }: Props
   ];
 
   return (
-    <div className="modal-overlay" onClick={handleOverlayClick}>
-      <div className="modal modal-lg settings-hub">
+    <>
         <div className="modal-header">
           <h2>{t('settings.title')}</h2>
-          <button className="icon-btn" onClick={onClose} aria-label={t('common.close')}>
+          <button className="icon-btn" onClick={requestClose} aria-label={t('common.close')}>
             <IconX />
           </button>
         </div>
@@ -194,6 +237,59 @@ export default function SettingsHub({ initialTab, onClose, onModelSaved }: Props
                     style={{ width: 80, textAlign: 'center' }}
                   />
                 </div>
+
+                <div className="settings-row settings-row-stack">
+                  <div>
+                    <div className="settings-label">{t('settings.general.dynamicBlur')}</div>
+                    <div className="settings-label-desc">{t('settings.general.dynamicBlurDesc')}</div>
+                  </div>
+                  <div className="settings-blur-control">
+                    <input
+                      className="settings-range"
+                      type="range"
+                      min={0}
+                      max={DYNAMIC_BLUR_LEVEL_MAX}
+                      step={1}
+                      value={clampDynamicBlurLevel(generalDraft.dynamicBlurLevel ?? 0)}
+                      onChange={(e) => handleDynamicBlurChange(Number(e.target.value))}
+                    />
+                    <span className="settings-blur-level-label">
+                      {t(DYNAMIC_BLUR_LEVEL_KEYS[clampDynamicBlurLevel(generalDraft.dynamicBlurLevel ?? 0)])}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-label">{t('settings.general.liquidGlass')}</div>
+                    <div className="settings-label-desc">{t('settings.general.liquidGlassDesc')}</div>
+                  </div>
+                  <button
+                    type="button"
+                    className={`theme-toggle-switch ${generalDraft.liquidGlassEnabled ? 'active' : ''}`}
+                    aria-pressed={!!generalDraft.liquidGlassEnabled}
+                    onClick={() => handleLiquidGlassChange(!generalDraft.liquidGlassEnabled)}
+                  />
+                </div>
+
+                {config && (
+                  <div className="settings-row">
+                    <div>
+                      <div className="settings-label">{t('settings.general.frameRate')}</div>
+                      <div className="settings-label-desc">{t('settings.general.frameRateDesc')}</div>
+                    </div>
+                    <input
+                      className="settings-input"
+                      type="number"
+                      min={1}
+                      max={240}
+                      step={1}
+                      value={config.appFrameRate ?? 60}
+                      onChange={(e) => handleFrameRateChange(Number(e.target.value))}
+                      style={{ width: 100, textAlign: 'center' }}
+                    />
+                  </div>
+                )}
               </div>
             )}
 
@@ -393,13 +489,32 @@ export default function SettingsHub({ initialTab, onClose, onModelSaved }: Props
 
                 <div className="settings-section">
                   <div className="settings-section-title">{t('settings.model.systemPrompt')}</div>
+                  <p className="settings-label-desc" style={{ marginBottom: 8 }}>
+                    {config.systemPromptCustomized
+                      ? t('settings.model.systemPromptCustom')
+                      : t('settings.model.systemPromptBuiltin')}
+                  </p>
                   <textarea
                     className="composer-textarea"
                     rows={5}
                     value={config.systemPrompt}
-                    onChange={(e) => setConfig({ ...config, systemPrompt: e.target.value })}
+                    onChange={(e) => setConfig({
+                      ...config,
+                      systemPrompt: e.target.value,
+                      systemPromptCustomized: e.target.value.trim() !== DEFAULT_SYSTEM_PROMPT.trim(),
+                    })}
                     style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
                   />
+                  <div className="settings-system-prompt-actions">
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={handleResetSystemPrompt}
+                      disabled={!config.systemPromptCustomized}
+                    >
+                      {t('settings.model.systemPromptReset')}
+                    </button>
+                  </div>
                 </div>
               </>
             )}
@@ -408,7 +523,7 @@ export default function SettingsHub({ initialTab, onClose, onModelSaved }: Props
           </div>
 
           <div className="settings-hub-footer">
-            <button type="button" className="btn btn-ghost" onClick={onClose}>{t('settings.cancel')}</button>
+            <button type="button" className="btn btn-ghost" onClick={requestClose}>{t('settings.cancel')}</button>
             {tab === 'general' && (
               <button
                 type="button"
@@ -432,7 +547,6 @@ export default function SettingsHub({ initialTab, onClose, onModelSaved }: Props
           </div>
           </div>
         </div>
-      </div>
-    </div>
+    </>
   );
 }

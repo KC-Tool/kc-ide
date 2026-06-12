@@ -102,8 +102,19 @@ export function detectLanguageFromPath(filePath: string): string {
   return LANG_MAP[ext] ?? ext;
 }
 
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 export function highlightCode(code: string, language?: string): { html: string; language: string } {
   const lang = normalizeLanguage(language);
+  if (lang === 'plaintext' || lang === 'text') {
+    return { html: escapeHtml(code), language: 'plaintext' };
+  }
   if (lang && hljs.getLanguage(lang)) {
     try {
       const result = hljs.highlight(code, { language: lang });

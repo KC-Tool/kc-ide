@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import type { AppSettings, ThemeMode } from '../../shared/ipc';
+import { applyVisualEffectsSettings } from '../lib/apply-visual-effects';
 import githubLight from 'highlight.js/styles/github.min.css?url';
 import githubDark from 'highlight.js/styles/github-dark.min.css?url';
 
@@ -39,6 +40,13 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
+
+  // 动态模糊 + 液态玻璃
+  useEffect(() => {
+    if (settings) {
+      applyVisualEffectsSettings(document.documentElement, settings);
+    }
+  }, [settings?.dynamicBlurLevel, settings?.liquidGlassEnabled, theme]);
 
   // 切换 highlight.js 主题
   useEffect(() => {

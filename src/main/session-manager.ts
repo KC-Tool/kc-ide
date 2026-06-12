@@ -1,9 +1,11 @@
 // 会话管理器 — 按工作区分目录持久化 ~/.koder/session/<folder>/<id>.json
 
-import { app } from 'electron';
+import { app, BrowserWindow } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { Worker } from 'node:worker_threads';
+import { fileURLToPath } from 'node:url';
 import type { Session, SessionListItem, SessionRepoGroup, ChatMessage, FileSnapshot } from '../shared/ipc.js';
 import type { TodoItem } from '../shared/todo-types.js';
 import { formatTodosForAgent } from '../shared/todo-types.js';
@@ -18,15 +20,164 @@ import {
 
 export { formatCwdLabel, formatRepoDisplayName, cwdToStorageFolder };
 
+type SessionsUpdatedListener = () => void;
+
 export class SessionManager {
   private sessions = new Map<string, Session>();
+  private fileIndex = new Map<string, string>();
   private legacyPath = '';
+  private loadPromise: Promise<void> | null = null;
+  private ready = false;
+  private onUpdatedListeners = new Set<SessionsUpdatedListener>();
+  private updateBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
 
   init(): void {
     ensureSessionsRoot();
     this.legacyPath = path.join(app.getPath('userData'), 'sessions.json');
     this.migrateLegacyIfNeeded();
-    this.loadAll();
+    this.buildFileIndex();
+    this.loadPromise = this.startBackgroundLoad();
+  }
+
+  onUpdated(listener: SessionsUpdatedListener): () => void {
+    this.onUpdatedListeners.add(listener);
+    return () => this.onUpdatedListeners.delete(listener);
+  }
+
+  isReady(): boolean {
+    return this.ready;
+  }
+
+  async waitUntilReady(): Promise<void> {
+    await this.loadPromise;
+  }
+
+  private scheduleBroadcast(): void {
+    if (this.updateBroadcastTimer) return;
+    this.updateBroadcastTimer = setTimeout(() => {
+      this.updateBroadcastTimer = null;
+      for (const fn of this.onUpdatedListeners) {
+        try { fn(); } catch { /* ignore */ }
+      }
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) {
+          win.webContents.send('sessions:updated');
+        }
+      }
+    }, 120);
+  }
+
+  private buildFileIndex(): void {
+    this.fileIndex.clear();
+    const root = getKoderSessionsRoot();
+    if (!fs.existsSync(root)) return;
+
+    for (const folderEnt of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!folderEnt.isDirectory()) continue;
+      const folderPath = path.join(root, folderEnt.name);
+      let files: string[];
+      try {
+        files = fs.readdirSync(folderPath);
+      } catch {
+        continue;
+      }
+      for (const file of files) {
+        if (!file.endsWith('.json')) continue;
+        const id = file.slice(0, -'.json'.length);
+        this.fileIndex.set(id, path.join(folderPath, file));
+      }
+    }
+  }
+
+  private loadOneSync(id: string): Session | null {
+    const filePath = this.fileIndex.get(id);
+    if (!filePath || !fs.existsSync(filePath)) return null;
+    try {
+      const raw = fs.readFileSync(filePath, 'utf8');
+      const session = JSON.parse(raw) as Session;
+      if (session?.id) {
+        this.sessions.set(session.id, session);
+        return session;
+      }
+    } catch {
+      // skip corrupt file
+    }
+    return null;
+  }
+
+  private async loadAllFallback(): Promise<void> {
+    const files = Array.from(this.fileIndex.values());
+    const BATCH = 4;
+    for (let i = 0; i < files.length; i += BATCH) {
+      const batch = files.slice(i, i + BATCH);
+      await new Promise<void>((resolve) => {
+        setImmediate(() => {
+          for (const filePath of batch) {
+            try {
+              const raw = fs.readFileSync(filePath, 'utf8');
+              const session = JSON.parse(raw) as Session;
+              if (session?.id) this.sessions.set(session.id, session);
+            } catch {
+              // skip
+            }
+          }
+          this.scheduleBroadcast();
+          resolve();
+        });
+      });
+    }
+  }
+
+  private startBackgroundLoad(): Promise<void> {
+    const files = Array.from(this.fileIndex.values());
+    if (files.length === 0) {
+      this.ready = true;
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      const workerPath = path.join(
+        path.dirname(fileURLToPath(import.meta.url)),
+        'session-load-worker.cjs',
+      );
+
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        this.ready = true;
+        this.scheduleBroadcast();
+        resolve();
+      };
+
+      try {
+        const worker = new Worker(workerPath, { workerData: { files } });
+        worker.on('message', (msg: { ok?: boolean; session?: Session; done?: boolean }) => {
+          if (msg.done) {
+            worker.terminate().catch(() => {});
+            finish();
+            return;
+          }
+          if (msg.ok && msg.session?.id) {
+            this.sessions.set(msg.session.id, msg.session);
+            this.scheduleBroadcast();
+          }
+        });
+        worker.on('error', (err) => {
+          console.error('[koder sessions] worker error:', err);
+          worker.terminate().catch(() => {});
+          void this.loadAllFallback().then(finish);
+        });
+        worker.on('exit', (code) => {
+          if (!settled && code !== 0) {
+            void this.loadAllFallback().then(finish);
+          }
+        });
+      } catch (err) {
+        console.error('[koder sessions] worker spawn failed:', err);
+        void this.loadAllFallback().then(finish);
+      }
+    });
   }
 
   private migrateLegacyIfNeeded(): void {
@@ -45,31 +196,6 @@ export class SessionManager {
       console.log('[koder sessions] migrated legacy sessions.json →', getKoderSessionsRoot());
     } catch (err) {
       console.error('[koder sessions] legacy migrate error:', err);
-    }
-  }
-
-  private loadAll(): void {
-    this.sessions.clear();
-    const root = getKoderSessionsRoot();
-    if (!fs.existsSync(root)) return;
-
-    const folders = fs.readdirSync(root, { withFileTypes: true });
-    for (const folderEnt of folders) {
-      if (!folderEnt.isDirectory()) continue;
-      const folderPath = path.join(root, folderEnt.name);
-      const files = fs.readdirSync(folderPath);
-      for (const file of files) {
-        if (!file.endsWith('.json')) continue;
-        try {
-          const raw = fs.readFileSync(path.join(folderPath, file), 'utf8');
-          const session = JSON.parse(raw) as Session;
-          if (session?.id) {
-            this.sessions.set(session.id, session);
-          }
-        } catch {
-          // skip corrupt file
-        }
-      }
     }
   }
 
@@ -114,7 +240,7 @@ export class SessionManager {
   }
 
   get(id: string): Session | null {
-    return this.sessions.get(id) ?? null;
+    return this.sessions.get(id) ?? this.loadOneSync(id);
   }
 
   create(cwd?: string): Session {
@@ -127,6 +253,7 @@ export class SessionManager {
       updatedAt: now,
       cwd: cwd || undefined,
     };
+    this.fileIndex.set(session.id, getSessionFilePath(session.id, session.cwd));
     this.persist(session);
     return session;
   }
@@ -136,6 +263,8 @@ export class SessionManager {
     if (!session) return;
     this.removeSessionFile(session);
     this.sessions.delete(id);
+    this.fileIndex.delete(id);
+    this.scheduleBroadcast();
   }
 
   getTodos(sessionId: string): TodoItem[] {

@@ -29,12 +29,28 @@ export function getTemporalAnchorWorkspaceLine(): string {
   return `Koder temporal anchor (authoritative): ${KODER_ANCHOR_ISO} — ${KODER_ANCHOR_DISPLAY_EN}`;
 }
 
+export interface WrapUserMessageOptions {
+  /** 同会话后续轮次：提示模型复用已有 tool 历史，避免重复扫项目 */
+  isFollowUp?: boolean;
+}
+
 /** 每条用户消息前的不可见锚点前缀（主进程注入，用户界面不展示原文） */
-export function wrapUserMessageWithTemporalAnchor(userText: string): string {
-  return [
+export function wrapUserMessageWithTemporalAnchor(
+  userText: string,
+  options?: WrapUserMessageOptions,
+): string {
+  const parts = [
     `[Koder Runtime] Authoritative date: ${KODER_ANCHOR_ISO} (${KODER_ANCHOR_DISPLAY_EN}).`,
-    userText,
-  ].join('\n\n');
+  ];
+
+  if (options?.isFollowUp) {
+    parts.push(
+      '[Session continuity] This chat already contains prior turns with tool results (read_file, grep, etc.) in the message history. Reuse that context. Do NOT repeat broad project exploration (list_dir/grep/glob/read_file across the repo) unless the user asks for new areas, files changed since last turn, or prior context is clearly insufficient for the new request.',
+    );
+  }
+
+  parts.push(userText);
+  return parts.join('\n\n');
 }
 
 /** Shell 工具输出包装 */

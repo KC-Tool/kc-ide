@@ -18,7 +18,13 @@ import { parseAtCommand } from '../shared/team-types.js';
 import { installSkillFromSkillHub } from './skills-installer.js';
 import { searchSkillHub } from './skillhub-client.js';
 import { getTemporalAnchorSystemBlock, wrapUserMessageWithTemporalAnchor } from './temporal-anchor.js';
+import { buildConversationHistoryForApi } from './conversation-history.js';
 import { parseSlashCommand } from '../shared/skills-types.js';
+import {
+  PLAN_MODE_SYSTEM_APPEND,
+  filterToolDefinitions,
+  type InteractionMode,
+} from '../shared/agent-modes.js';
 import { setTodoToolOps, setDelegateRunner } from './tools.js';
 import { formatTodosForAgent } from '../shared/todo-types.js';
 import {
@@ -27,6 +33,7 @@ import {
   setDelegateContext,
 } from './team-delegate.js';
 import type { SkillHubSearchParams } from '../shared/skillhub-types.js';
+import { globalPlanManager } from './plan-manager.js';
 import type {
   AgentConfig,
   AgentEvent,
@@ -37,6 +44,7 @@ import type {
   DirEntry,
   FileSnapshot,
   MessageSegment,
+  PlanSaveRequest,
   Session,
   SessionListItem,
 } from '../shared/ipc.js';
@@ -53,6 +61,18 @@ const sessions = new SessionManager();
 const settings = new SettingsManager();
 const configManager = new ConfigManager();
 const agentEngine = new AgentEngine();
+
+function applyFrameRateToWindow(win: BrowserWindow | null): void {
+  if (!win || win.isDestroyed()) return;
+  const fps = configManager.get().appFrameRate ?? 60;
+  const clamped = Math.min(240, Math.max(1, Math.round(fps) || 60));
+  try {
+    win.webContents.setFrameRate(clamped);
+  } catch {
+    // 部分 Electron 版本可能不支持
+  }
+  win.webContents.send('config:frame_rate', { appFrameRate: clamped });
+}
 
 function buildEffectiveSystemPrompt(base: string): string {
   return base + getTemporalAnchorSystemBlock() + globalSkillsManager.buildCatalogForSystemPrompt() + globalTeamManager.buildCatalogForSystemPrompt();
@@ -128,6 +148,8 @@ async function createMainWindow() {
     await mainWindow.loadFile(path.join(RENDERER_DIST, 'index.html'));
   }
 
+  applyFrameRateToWindow(mainWindow);
+
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
@@ -144,7 +166,17 @@ ipcMain.handle('config:get', (): AgentConfig => {
 });
 
 ipcMain.handle('config:update', (_event, patch: Partial<AgentConfig>): AgentConfig => {
-  return configManager.update(patch);
+  const next = configManager.update(patch);
+  applyFrameRateToWindow(mainWindow);
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) {
+      win.webContents.send('config:updated', {
+        appFrameRate: next.appFrameRate ?? 60,
+        maxContextTokens: next.maxContextTokens,
+      });
+    }
+  }
+  return next;
 });
 
 // ---- IPC: Agent 运行 ----
@@ -204,12 +236,19 @@ ipcMain.handle('agent:run', async (event, req: AgentRunRequest) => {
     userPrompt = globalTeamManager.buildCreateTeamInjection(userPrompt, getKoderTeamsDir());
   }
 
-  if (activeTeamId && !req.createTeam) {
+  const interactionMode: InteractionMode = req.interactionMode ?? 'agent';
+  const teamActive = interactionMode === 'agent' && !!activeTeamId && !req.createTeam;
+
+  if (teamActive && activeTeamId) {
     sessions.updateMeta(req.sessionId, { activeTeamId });
   }
 
   let effectiveSystemPrompt = buildEffectiveSystemPrompt(agentConfig.systemPrompt);
-  if (activeTeamId && !req.createTeam) {
+  if (interactionMode === 'plan') {
+    effectiveSystemPrompt += `\n\n${PLAN_MODE_SYSTEM_APPEND}`;
+  }
+
+  if (teamActive && activeTeamId) {
     const coordinator = globalTeamManager.buildCoordinatorSystemBlock(activeTeamId);
     if (coordinator) {
       effectiveSystemPrompt += coordinator;
@@ -221,12 +260,12 @@ ipcMain.handle('agent:run', async (event, req: AgentRunRequest) => {
     systemPrompt: effectiveSystemPrompt,
   };
 
-  const leadTools = getLeadToolDefinitions(!!activeTeamId && !req.createTeam);
+  let leadTools = getLeadToolDefinitions(teamActive);
+  leadTools = filterToolDefinitions(leadTools, interactionMode) as typeof leadTools;
 
-  const conversationHistory = (session?.messages ?? []).map((m) => ({
-    role: m.role as 'user' | 'assistant' | 'system',
-    content: m.text,
-  }));
+  const priorMessages = session?.messages ?? [];
+  const isFollowUp = priorMessages.some((m) => m.role === 'assistant');
+  const conversationHistory = buildConversationHistoryForApi(priorMessages);
 
   const sessionTodos = sessions.getTodos(req.sessionId);
   if (sessionTodos.length > 0) {
@@ -235,7 +274,7 @@ ipcMain.handle('agent:run', async (event, req: AgentRunRequest) => {
 
   conversationHistory.push({
     role: 'user' as const,
-    content: wrapUserMessageWithTemporalAnchor(userPrompt),
+    content: wrapUserMessageWithTemporalAnchor(userPrompt, { isFollowUp }),
   });
 
   // 收集文件快照（用于回退）
@@ -331,7 +370,7 @@ ipcMain.handle('agent:run', async (event, req: AgentRunRequest) => {
   };
 
   setDelegateContext({
-    teamId: activeTeamId && !req.createTeam ? activeTeamId : null,
+    teamId: teamActive && activeTeamId ? activeTeamId : null,
     sessionId: req.sessionId,
     cwd,
     config: effectiveConfig,
@@ -366,6 +405,22 @@ ipcMain.handle('agent:run', async (event, req: AgentRunRequest) => {
         broadcastTeamsChanged();
       }
 
+      if (interactionMode === 'plan' && assistantText.trim()) {
+        const saved = globalPlanManager.save({
+          sessionId: req.sessionId,
+          title: session?.title,
+          markdown: assistantText,
+          cwd,
+        });
+        if (!sender.isDestroyed()) {
+          sender.send('plan:saved', {
+            ...saved,
+            markdown: assistantText,
+            sessionId: req.sessionId,
+          });
+        }
+      }
+
       // 通知渲染进程刷新
       if (!sender.isDestroyed()) {
         sender.send('agent:message_saved', { sessionId: req.sessionId });
@@ -381,6 +436,10 @@ ipcMain.handle('agent:run', async (event, req: AgentRunRequest) => {
 
 ipcMain.handle('agent:cancel', async (_event, sessionId: string) => {
   return { ok: agentEngine.cancel(sessionId) };
+});
+
+ipcMain.handle('plan:save', (_event, req: PlanSaveRequest) => {
+  return globalPlanManager.save(req);
 });
 
 // ---- IPC: 会话管理 ----
@@ -556,16 +615,19 @@ ipcMain.handle('teams:reload', () => {
 
 app.whenReady().then(async () => {
   resolvePaths();
-  sessions.init();
   settings.init();
+  sessions.init();
   setTodoToolOps({
     addTodo: (sid, text) => sessions.addTodo(sid, text),
     completeTodo: (sid, id) => sessions.completeTodo(sid, id),
     listTodos: (sid) => sessions.getTodos(sid),
   });
-  globalSkillsManager.init();
-  globalTeamManager.init();
   await createMainWindow();
+
+  setImmediate(() => {
+    globalSkillsManager.init();
+    globalTeamManager.init();
+  });
 
   app.on('activate', async () => {
     if (BrowserWindow.getAllWindows().length === 0) {

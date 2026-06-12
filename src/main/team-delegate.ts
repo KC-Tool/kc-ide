@@ -5,7 +5,6 @@ import type { AgentEngine } from './agent-engine.js';
 import { globalTeamManager } from './team-manager.js';
 import { runSubAgent } from './sub-agent-runner.js';
 import { TOOL_DEFINITIONS } from './tools.js';
-
 export const DELEGATE_TOOL_DEFINITIONS = [
   {
     type: 'function' as const,
@@ -74,6 +73,29 @@ export const DELEGATE_TOOL_DEFINITIONS = [
 /** 子 Agent 可用工具（与主 Agent 相同，委派工具仅主 Agent 持有） */
 export const SUB_AGENT_TOOL_DEFINITIONS = TOOL_DEFINITIONS;
 
+/** Team 模式下主 Agent（LEAD）仅保留只读 + 委派 + todo，禁止直接写文件/跑 shell */
+const LEAD_TOOL_NAMES = new Set([
+  'read_file',
+  'list_dir',
+  'grep',
+  'glob',
+  'todo_add',
+  'todo_complete',
+  'todo_list',
+  'delegate_agent',
+  'delegate_agents_parallel',
+  'spawn_agent',
+]);
+
+export function getLeadToolDefinitions(teamActive: boolean): typeof TOOL_DEFINITIONS {
+  if (!teamActive) return TOOL_DEFINITIONS;
+  const readAndDelegate = TOOL_DEFINITIONS.filter(t => LEAD_TOOL_NAMES.has(t.function.name));
+  const delegateOnly = DELEGATE_TOOL_DEFINITIONS.filter(
+    t => !readAndDelegate.some(r => r.function.name === t.function.name),
+  );
+  return [...readAndDelegate, ...delegateOnly] as typeof TOOL_DEFINITIONS;
+}
+
 export interface DelegateContext {
   teamId: string | null;
   sessionId: string;
@@ -87,11 +109,6 @@ let delegateContext: DelegateContext | null = null;
 
 export function setDelegateContext(ctx: DelegateContext | null): void {
   delegateContext = ctx;
-}
-
-export function getLeadToolDefinitions(teamActive: boolean): typeof TOOL_DEFINITIONS {
-  if (!teamActive) return TOOL_DEFINITIONS;
-  return [...TOOL_DEFINITIONS, ...DELEGATE_TOOL_DEFINITIONS] as typeof TOOL_DEFINITIONS;
 }
 
 function slugify(s: string): string {

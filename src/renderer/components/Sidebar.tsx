@@ -98,6 +98,12 @@ export default function Sidebar({
     void loadTree();
   }, [loadTree, refreshKey]);
 
+  useEffect(() => {
+    return window.koder.onSessionsUpdated(() => {
+      void loadTree();
+    });
+  }, [loadTree]);
+
   const toggleRepo = (key: string) => {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -187,12 +193,19 @@ export default function Sidebar({
               {isOpen && (
                 <div className="repo-sessions">
                   {group.sessions.map((s) => (
-                    <button
+                    <div
                       key={s.id}
-                      type="button"
                       className={`repo-session-item ${s.id === currentSessionId ? 'active' : ''}`}
                       onClick={() => onSelectSession(s.id)}
                       title={s.title}
+                      role="button"
+                      tabIndex={0}
+                      onKeyPress={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          onSelectSession(s.id);
+                        }
+                      }}
                     >
                       <span className="repo-session-dot" aria-hidden />
                       <span className="repo-session-title">{s.title}</span>
@@ -207,7 +220,7 @@ export default function Sidebar({
                       >
                         ×
                       </button>
-                    </button>
+                    </div>
                   ))}
                   {group.sessions.length === 0 && (
                     <div className="repo-sessions-empty">{t('sidebar.newSessionInRepo')}</div>

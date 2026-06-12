@@ -13,6 +13,9 @@ try {
   const skillsChangedListeners = new Set();
   const teamsChangedListeners = new Set();
   const sessionTodosChangedListeners = new Set();
+  const configUpdatedListeners = new Set();
+  const planSavedListeners = new Set();
+  const sessionsUpdatedListeners = new Set();
 
   ipcRenderer.on('agent:event', (_event, payload) => {
     for (const cb of agentListeners) {
@@ -60,6 +63,36 @@ try {
         cb(payload);
       } catch (err) {
         console.error('[koder preload] sessionTodosChanged listener error', err);
+      }
+    }
+  });
+
+  ipcRenderer.on('config:updated', (_event, payload) => {
+    for (const cb of configUpdatedListeners) {
+      try {
+        cb(payload);
+      } catch (err) {
+        console.error('[koder preload] configUpdated listener error', err);
+      }
+    }
+  });
+
+  ipcRenderer.on('sessions:updated', () => {
+    for (const cb of sessionsUpdatedListeners) {
+      try {
+        cb();
+      } catch (err) {
+        console.error('[koder preload] sessionsUpdated listener error', err);
+      }
+    }
+  });
+
+  ipcRenderer.on('plan:saved', (_event, payload) => {
+    for (const cb of planSavedListeners) {
+      try {
+        cb(payload);
+      } catch (err) {
+        console.error('[koder preload] planSaved listener error', err);
       }
     }
   });
@@ -140,6 +173,24 @@ try {
       messageSavedListeners.add(cb);
       return () => messageSavedListeners.delete(cb);
     },
+
+    // ---- Plan ----
+    savePlan: (req) => ipcRenderer.invoke('plan:save', req),
+    onPlanSaved: (cb) => {
+      planSavedListeners.add(cb);
+      return () => planSavedListeners.delete(cb);
+    },
+
+    // ---- 配置变更通知 ----
+    onConfigUpdated: (cb) => {
+      configUpdatedListeners.add(cb);
+      return () => configUpdatedListeners.delete(cb);
+    },
+
+    onSessionsUpdated: (cb) => {
+      sessionsUpdatedListeners.add(cb);
+      return () => sessionsUpdatedListeners.delete(cb);
+    },
   });
 
   process.stdout.write('[koder preload] loaded, window.koder exposed\n');
@@ -191,6 +242,10 @@ try {
       toggleSessionTodo: reject('preload 初始化失败'),
       onSessionTodosChanged: reject('preload 初始化失败'),
       onMessageSaved: reject('preload 初始化失败'),
+      savePlan: reject('preload 初始化失败'),
+      onPlanSaved: reject('preload 初始化失败'),
+      onConfigUpdated: reject('preload 初始化失败'),
+      onSessionsUpdated: reject('preload 初始化失败'),
     });
   } catch {
     // 真的什么都做不了
