@@ -37,7 +37,6 @@
     "electron-builder": "^26.8.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "tsx": "^4.22.4",
     "typescript": "^6.0.3",
     "vite": "^8.0.16",
     "wait-on": "^8.0.5"
@@ -46,6 +45,7 @@
     "adm-zip": "^0.5.17",
     "highlight.js": "^11.11.1",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "tsx": "^4.22.4"
   }
 }
