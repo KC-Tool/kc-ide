@@ -219,6 +219,9 @@ importers:
       remark-gfm:
         specifier: ^4.0.1
         version: 4.0.1
+      tsx:
+        specifier: ^4.22.4
+        version: 4.22.4
     devDependencies:
       '@types/adm-zip':
         specifier: ^0.5.8
@@ -253,9 +256,6 @@ importers:
       react-dom:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
-      tsx:
-        specifier: ^4.22.4
-        version: 4.22.4
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
